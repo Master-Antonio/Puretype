@@ -1,0 +1,125 @@
+# ============================================================
+#  PureType — Automated Release Build
+#
+#  Triggers on a pushed tag matching  v*  (e.g. v0.2.0).
+#  Builds the C++ components with CMake / MSVC and the WPF UI
+#  with dotnet, packages everything into a ZIP, computes the
+#  SHA-256 hash, and publishes a GitHub Release with the asset.
+# ============================================================
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write          # required by gh release create
+
+env:
+  BUILD_CONFIG: Release
+  DOTNET_VERSION: "9.0.x"
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      # ── Checkout ─────────────────────────────────────────────
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # ── Setup .NET SDK ───────────────────────────────────────
+      - name: Setup .NET ${{ env.DOTNET_VERSION }}
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # ── Setup MSVC ───────────────────────────────────────────
+      - name: Setup MSVC (Developer Command Prompt)
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # ── CMake configure & build (C++ DLL + Injector) ─────────
+      - name: CMake Configure
+        run: cmake -B build -G "Ninja" -DCMAKE_BUILD_TYPE=${{ env.BUILD_CONFIG }}
+
+      - name: CMake Build
+        run: cmake --build build --config ${{ env.BUILD_CONFIG }}
+
+      # ── Build WPF UI (C#) ───────────────────────────────────
+      - name: Build PuretypeUI
+        run: dotnet publish PuretypeUI/PuretypeUI.csproj -c ${{ env.BUILD_CONFIG }} -r win-x64 --self-contained false
+
+      # ── Assemble release artifacts ──────────────────────────
+      - name: Assemble release ZIP
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $out = "release-staging"
+          New-Item -ItemType Directory -Path $out -Force | Out-Null
+
+          # C++ artefacts
+          Copy-Item "build/PureType.dll"     "$out/" -Force
+          Copy-Item "build/puretype.exe"     "$out/" -Force
+
+          # WPF artefacts
+          $wpfOut = "PuretypeUI/bin/${{ env.BUILD_CONFIG }}/net9.0-windows/win-x64"
+          Copy-Item "$wpfOut/PuretypeUI.exe"                "$out/" -Force
+          Copy-Item "$wpfOut/PuretypeUI.dll"                "$out/" -Force
+          Copy-Item "$wpfOut/PuretypeUI.runtimeconfig.json" "$out/" -Force
+
+          # Config, icon, fonts
+          Copy-Item "puretype.ini"  "$out/" -Force
+          Copy-Item "src/puretype.ico" "$out/" -Force
+          Copy-Item "font" "$out/font" -Recurse -Force
+
+          # Create ZIP
+          $zipName = "PureType-$tag.zip"
+          Compress-Archive -Path "$out/*" -DestinationPath $zipName -Force
+
+          # Compute SHA-256
+          $hash = (Get-FileHash -Path $zipName -Algorithm SHA256).Hash.ToLower()
+          Write-Host "SHA256: $hash"
+
+          # Export for later steps
+          "ZIP_NAME=$zipName"    | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "ZIP_SHA256=$hash"     | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      # ── Create GitHub Release ───────────────────────────────
+      - name: Create Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          $tag  = "${{ github.ref_name }}"
+          $zip  = "${{ env.ZIP_NAME }}"
+          $hash = "${{ env.ZIP_SHA256 }}"
+
+          $body = @"
+          ## PureType $tag
+
+          ### Installation
+          1. Download ``$zip`` below.
+          2. Extract into a folder (e.g. ``C:\PureType``).
+          3. Run ``puretype.exe`` — an icon appears in the system tray.
+          4. Double-click the tray icon to open Settings.
+
+          ### Integrity
+          ``````
+          SHA256: $hash
+          ``````
+
+          ---
+          *Built automatically by GitHub Actions.*
+          "@
+
+          # Remove leading whitespace from each line (caused by YAML indentation)
+          $body = ($body -split "`n" | ForEach-Object { $_.TrimStart() }) -join "`n"
+
+          gh release create $tag $zip `
+            --title "PureType $tag" `
+            --notes $body
+
+
