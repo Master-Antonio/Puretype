@@ -1,0 +1,3 @@
+// PureType Application Icon Resource
+// Resource ID 1 = IDI_PURETYPE_ICON (matches injector.cpp)
+1 ICON "puretype.ico"
