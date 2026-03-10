@@ -7,27 +7,24 @@
 namespace puretype {
 
 enum class PanelType {
-
-    WRGB,
-
     QD_OLED_TRIANGLE,
-    
-    RWBG
+    RWBG,
+    RGWB
 };
 
 struct ConfigData {
-    PanelType   panelType              = PanelType::WRGB;
+    PanelType   panelType              = PanelType::QD_OLED_TRIANGLE;
     float       filterStrength         = 1.0f;
     float       gamma                  = 1.0f;
     bool        enableSubpixelHinting = true;
     bool        enableFractionalPositioning = true;
     float       lodThresholdSmall      = 12.0f;
     float       lodThresholdLarge      = 24.0f;
-    float       woledCrossTalkReduction = 0.08f;
-    float       lumaContrastStrength   = 1.0f;
+    float       woledCrossTalkReduction = 0.0f;
+    float       lumaContrastStrength   = 1.25f;
 
     bool        stemDarkeningEnabled   = true;
-    float       stemDarkeningStrength  = 0.4f;
+    float       stemDarkeningStrength  = 0.35f;
 
     bool        debugEnabled            = false;
     std::string logFile                 = "puretype.log";

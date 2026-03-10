@@ -69,13 +69,13 @@ bool Config::LoadFromFile(const std::string& iniPath) {
     }
     file.close();
 
-    std::string panelStr = ToLower(GetValue("general", "paneltype", "wrgb"));
+    std::string panelStr = ToLower(GetValue("general", "paneltype", "rwbg"));
     if (panelStr == "qd_oled_triangle" || panelStr == "qdoled" || panelStr == "triangular") {
         m_data.panelType = PanelType::QD_OLED_TRIANGLE;
-    } else if (panelStr == "rwbg") {
-        m_data.panelType = PanelType::RWBG;
+    } else if (panelStr == "rgwb") {
+        m_data.panelType = PanelType::RGWB;
     } else {
-        m_data.panelType = PanelType::WRGB;
+        m_data.panelType = PanelType::RWBG;
     }
 
     try { m_data.filterStrength = std::stof(GetValue("general", "filterstrength", "1.0")); }

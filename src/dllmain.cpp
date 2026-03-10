@@ -169,9 +169,10 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
                           PURETYPE_VERSION_MINOR,
                           PURETYPE_VERSION_PATCH);
             PureTypeLog("Host process: %ls", hostExe);
-            PureTypeLog("Panel type: %s",
-                puretype::Config::Instance().Data().panelType ==
-                    puretype::PanelType::WRGB ? "WRGB" : "QD_OLED_TRIANGLE");
+            const char* panelName = "RWBG";
+            if (puretype::Config::Instance().Data().panelType == puretype::PanelType::QD_OLED_TRIANGLE) panelName = "QD_OLED_TRIANGLE";
+            else if (puretype::Config::Instance().Data().panelType == puretype::PanelType::RGWB) panelName = "RGWB";
+            PureTypeLog("Panel type: %s", panelName);
             PureTypeLog("Filter strength: %.2f",
                 puretype::Config::Instance().Data().filterStrength);
             PureTypeLog("Gamma: %.2f",

@@ -28,7 +28,7 @@ public:
     static std::unique_ptr<SubpixelFilter> Create(int panelType);
 };
 
-class WRGBFilter : public SubpixelFilter {
+class WOLEDFilter : public SubpixelFilter {
 public:
     RGBABitmap Apply(const GlyphBitmap& glyph,
                      const ConfigData& cfg) const override;

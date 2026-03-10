@@ -12,10 +12,7 @@
 #include <list>
 #include <unordered_map>
 #include <mutex>
-#include <intrin.h>
-#if defined(__AVX2__)
-#include <immintrin.h>
-#endif
+#include <mutex>
 
 namespace puretype {
 
@@ -167,113 +164,24 @@ FilterCacheKey BuildFilterKey(const GlyphBitmap& glyph, const ConfigData& cfg) {
     return key;
 }
 
-bool CpuSupportsAVX2() {
-#if defined(_M_X64) || defined(_M_IX86)
-    int regs[4] = {0, 0, 0, 0};
-    __cpuid(regs, 1);
-    const bool osxsave = (regs[2] & (1 << 27)) != 0;
-    const bool avx = (regs[2] & (1 << 28)) != 0;
-    if (!(osxsave && avx)) return false;
-
-    const unsigned long long xcr0 = _xgetbv(0);
-    if ((xcr0 & 0x6) != 0x6) return false;
-
-    __cpuidex(regs, 7, 0);
-    return (regs[1] & (1 << 5)) != 0;
-#else
-    return false;
-#endif
-}
-
-inline bool HasAvx2Runtime() {
-    static const bool kHasAvx2 = CpuSupportsAVX2();
-    return kHasAvx2;
-}
-
-void Convolve5TapPhaseScalar(const float* src,
-                             int width,
-                             const float* kernel,
-                             float phase,
-                             float* dst) {
-    for (int x = 0; x < width; ++x) {
-        float acc = 0.0f;
-        for (int t = -2; t <= 2; ++t) {
-            const float fx = static_cast<float>(x + t) + phase;
-            const int x0 = std::clamp(static_cast<int>(std::floor(fx)), 0, width - 1);
-            const int x1 = std::clamp(x0 + 1, 0, width - 1);
-            const float frac = fx - static_cast<float>(x0);
-            const float sample = src[x0] + (src[x1] - src[x0]) * frac;
-            acc += sample * kernel[t + 2];
-        }
-        dst[x] = acc;
-    }
-}
-
-#if defined(__AVX2__)
-void Convolve5TapPhaseAVX2(const float* src,
-                           int width,
-                           const float* kernel,
-                           float phase,
-                           float* dst) {
-    if (width < 16) {
-        Convolve5TapPhaseScalar(src, width, kernel, phase, dst);
-        return;
-    }
-
-    const __m256 vPhase = _mm256_set1_ps(phase);
-    int x = 0;
-    for (; x < 2 && x < width; ++x) {
-        float acc = 0.0f;
-        for (int t = -2; t <= 2; ++t) {
-            const float fx = static_cast<float>(x + t) + phase;
-            const int x0 = std::clamp(static_cast<int>(std::floor(fx)), 0, width - 1);
-            const int x1 = std::clamp(x0 + 1, 0, width - 1);
-            const float frac = fx - static_cast<float>(x0);
-            const float sample = src[x0] + (src[x1] - src[x0]) * frac;
-            acc += sample * kernel[t + 2];
-        }
-        dst[x] = acc;
-    }
-
-    const int vecEnd = width - 10;
-    for (; x <= vecEnd; x += 8) {
-        __m256 sum = _mm256_setzero_ps();
-        for (int t = -2; t <= 2; ++t) {
-            const __m256 a = _mm256_loadu_ps(src + x + t);
-            const __m256 b = _mm256_loadu_ps(src + x + t + 1);
-            const __m256 interp = _mm256_add_ps(a, _mm256_mul_ps(vPhase, _mm256_sub_ps(b, a)));
-            const __m256 w = _mm256_set1_ps(kernel[t + 2]);
-            sum = _mm256_add_ps(sum, _mm256_mul_ps(interp, w));
-        }
-        _mm256_storeu_ps(dst + x, sum);
-    }
-
-    for (; x < width; ++x) {
-        float acc = 0.0f;
-        for (int t = -2; t <= 2; ++t) {
-            const float fx = static_cast<float>(x + t) + phase;
-            const int x0 = std::clamp(static_cast<int>(std::floor(fx)), 0, width - 1);
-            const int x1 = std::clamp(x0 + 1, 0, width - 1);
-            const float frac = fx - static_cast<float>(x0);
-            const float sample = src[x0] + (src[x1] - src[x0]) * frac;
-            acc += sample * kernel[t + 2];
-        }
-        dst[x] = acc;
-    }
-}
-#endif
-
 } // namespace
 
 std::unique_ptr<SubpixelFilter> SubpixelFilter::Create(int panelType) {
     if (panelType == static_cast<int>(PanelType::QD_OLED_TRIANGLE)) {
         return std::make_unique<TriangularFilter>();
     }
-    return std::make_unique<WRGBFilter>();
+    return std::make_unique<WOLEDFilter>();
 }
 
-RGBABitmap WRGBFilter::Apply(const GlyphBitmap& glyph,
-                             const ConfigData& cfg) const {
+inline float SampleContinuousX(const uint8_t* row, float fx, int width3x) {
+    int x0 = std::clamp(static_cast<int>(fx), 0, width3x - 1);
+    int x1 = std::clamp(x0 + 1, 0, width3x - 1);
+    float t = fx - static_cast<float>(x0);
+    return sRGBToLinear(row[x0]) * (1.0f - t) + sRGBToLinear(row[x1]) * t;
+}
+
+RGBABitmap WOLEDFilter::Apply(const GlyphBitmap& glyph,
+                              const ConfigData& cfg) const {
     const FilterCacheKey cacheKey = BuildFilterKey(glyph, cfg);
     RGBABitmap cached;
     if (GetFilteredGlyphCache().TryGet(cacheKey, cached)) {
@@ -288,196 +196,80 @@ RGBABitmap WRGBFilter::Apply(const GlyphBitmap& glyph,
     result.width = pixelWidth;
     result.height = height;
     result.pitch = pixelWidth * 4;
+    
+    if (pixelWidth <= 0 || height <= 0) return result;
+    
     result.data.resize(result.pitch * height, 0);
 
-    if (pixelWidth <= 0 || height <= 0) return result;
-
-    const float phaseX = PhaseFromQuant(glyph.phaseX, cfg.enableFractionalPositioning);
-    const float phaseY = PhaseFromQuant(glyph.phaseY, cfg.enableFractionalPositioning);
-
     const float emSize = static_cast<float>(height);
-    const float lodRelax = ComputeLodRelax(emSize, cfg.lodThresholdSmall, cfg.lodThresholdLarge);
-    const float antiFringe = 1.0f - lodRelax;
+        const float darkenAmount = cfg.stemDarkeningEnabled
+            ? computeDarkenAmount(emSize, cfg.stemDarkeningStrength)
+            : 0.0f;
 
-    constexpr float kRBase[5] = {0.00f, 0.03f, 0.44f, 0.09f, 0.03f};
-    constexpr float kGBase[5] = {0.00f, 0.18f, 0.64f, 0.18f, 0.00f};
-    constexpr float kBBase[5] = {0.03f, 0.09f, 0.44f, 0.03f, 0.00f};
+        const float FILTER_WEIGHTS[7] = { 
+            1.0f/16.0f, 2.0f/16.0f, 3.0f/16.0f, 4.0f/16.0f, 
+            3.0f/16.0f, 2.0f/16.0f, 1.0f/16.0f 
+        };
 
-    float kR[5], kG[5], kB[5];
-    for (int i = 0; i < 5; ++i) {
-        kR[i] = kRBase[i] * antiFringe;
-        kG[i] = kGBase[i] * antiFringe;
-        kB[i] = kBBase[i] * antiFringe;
-    }
-    kR[2] += lodRelax;
-    kG[2] += lodRelax;
-    kB[2] += lodRelax;
-
-    auto normalize5 = [](float* k) {
-        float sum = 0.0f;
-        for (int i = 0; i < 5; ++i) sum += k[i];
-        if (sum <= 1e-6f) {
-            k[0] = k[1] = k[3] = k[4] = 0.0f;
-            k[2] = 1.0f;
-            return;
-        }
-        const float inv = 1.0f / sum;
-        for (int i = 0; i < 5; ++i) k[i] *= inv;
-    };
-    normalize5(kR);
-    normalize5(kG);
-    normalize5(kB);
-
-    const float kWhiteBase = 0.22f * (0.60f + 0.40f * antiFringe);
-    const float chromaStrength = std::clamp(cfg.filterStrength * (0.70f + 0.30f * lodRelax), 0.0f, 1.0f);
-
-    const float darkenAmount = cfg.stemDarkeningEnabled
-        ? computeDarkenAmount(emSize, cfg.stemDarkeningStrength)
-        : 0.0f;
-
-    std::vector<float> rawR(pixelWidth * height);
-    std::vector<float> rawG(pixelWidth * height);
-    std::vector<float> rawB(pixelWidth * height);
-
-    for (int y = 0; y < height; ++y) {
-        const uint8_t* row0 = glyph.data.data() + y * glyph.pitch;
-        for (int px = 0; px < pixelWidth; ++px) {
-            int sx = px * 3;
-            int off = y * pixelWidth + px;
-
-            const float r0 = sRGBToLinear(row0[sx + 0]);
-            const float g0 = sRGBToLinear(row0[sx + 1]);
-            const float b0 = sRGBToLinear(row0[sx + 2]);
-
-            // Map logical RGB to physical subpixel layout
-            if (cfg.panelType == PanelType::RWBG) {
-                rawR[off] = r0;
-                rawB[off] = g0;
-                rawG[off] = b0;
-            } else {
-                rawR[off] = r0;
-                rawG[off] = g0;
-                rawB[off] = b0;
+        for (int y = 0; y < height; ++y) {
+            const uint8_t* row0 = glyph.data.data() + y * glyph.pitch;
+            std::vector<float> cov4X(pixelWidth * 4);
+            
+            for (int px = 0; px < pixelWidth; ++px) {
+                float center_x = px * 3.0f + 1.0f;
+                // Subpixel spacing in 3X coordinate space is exactly 0.75f per physical subpixel
+                cov4X[px * 4 + 0] = SampleContinuousX(row0, center_x - 1.125f, pixelWidth * 3);
+                cov4X[px * 4 + 1] = SampleContinuousX(row0, center_x - 0.375f, pixelWidth * 3);
+                cov4X[px * 4 + 2] = SampleContinuousX(row0, center_x + 0.375f, pixelWidth * 3);
+                cov4X[px * 4 + 3] = SampleContinuousX(row0, center_x + 1.125f, pixelWidth * 3);
             }
-        }
-    }
 
-    const float gammaPow = cfg.gamma;
-    const float invGammaPow = (gammaPow > 0.01f) ? (1.0f / gammaPow) : 1.0f;
-
-    std::vector<float> filtRBuf(pixelWidth);
-    std::vector<float> filtGBuf(pixelWidth);
-    std::vector<float> filtBBuf(pixelWidth);
-
-    for (int y = 0; y < height; ++y) {
-        float* rowR = rawR.data() + y * pixelWidth;
-        float* rowG = rawG.data() + y * pixelWidth;
-        float* rowB = rawB.data() + y * pixelWidth;
-
-        // Fractional offsets are handled by FreeType's hinting geometry
-        const float convPhaseX = 0.0f;
-
-        if (HasAvx2Runtime()) {
-#if defined(__AVX2__)
-            Convolve5TapPhaseAVX2(rowR, pixelWidth, kR, convPhaseX, filtRBuf.data());
-            Convolve5TapPhaseAVX2(rowG, pixelWidth, kG, convPhaseX, filtGBuf.data());
-            Convolve5TapPhaseAVX2(rowB, pixelWidth, kB, convPhaseX, filtBBuf.data());
-#else
-            Convolve5TapPhaseScalar(rowR, pixelWidth, kR, convPhaseX, filtRBuf.data());
-            Convolve5TapPhaseScalar(rowG, pixelWidth, kG, convPhaseX, filtGBuf.data());
-            Convolve5TapPhaseScalar(rowB, pixelWidth, kB, convPhaseX, filtBBuf.data());
-#endif
-        } else {
-            Convolve5TapPhaseScalar(rowR, pixelWidth, kR, convPhaseX, filtRBuf.data());
-            Convolve5TapPhaseScalar(rowG, pixelWidth, kG, convPhaseX, filtGBuf.data());
-            Convolve5TapPhaseScalar(rowB, pixelWidth, kB, convPhaseX, filtBBuf.data());
-        }
-
-        for (int px = 0; px < pixelWidth; ++px) {
-            float filtR = filtRBuf[px];
-            float filtG = filtGBuf[px];
-            float filtB = filtBBuf[px];
-
-            int off = y * pixelWidth + px;
-            int leftX = std::max(px - 1, 0);
-            int rightX = std::min(px + 1, pixelWidth - 1);
-            int leftOff = y * pixelWidth + leftX;
-            int rightOff = y * pixelWidth + rightX;
-
-            float yCenter = 0.2126f * rawR[off] + 0.7152f * rawG[off] + 0.0722f * rawB[off];
-            float yLeft   = 0.2126f * rawR[leftOff] + 0.7152f * rawG[leftOff] + 0.0722f * rawB[leftOff];
-            float yRight  = 0.2126f * rawR[rightOff] + 0.7152f * rawG[rightOff] + 0.0722f * rawB[rightOff];
-
-            float gradient = std::abs(yLeft - yRight);
-            float edgeFactor = 1.0f - std::clamp(gradient * 2.0f, 0.0f, 0.70f);
-
-            /* Evaluate Luma Sharpness scale multipliers BEFORE subtracting bleed */
-
-            auto getLuma = [](float r, float g, float b) {
-                return 0.2126f * r + 0.7152f * g + 0.0722f * b;
-            };
-
-            // Extract sharp luma mask from raw rendering vector
-            float rawY = getLuma(rawR[off], rawG[off], rawB[off]);
-            float filtY = getLuma(filtR, filtG, filtB);
-
-            float finalR = rawY + (filtR - filtY) * chromaStrength;
-            float finalG = rawY + (filtG - filtY) * chromaStrength;
-            float finalB = rawY + (filtB - filtY) * chromaStrength;
-
-            float yLeft2  = 0.2126f * rawR[leftOff] + 0.7152f * rawG[leftOff] + 0.0722f * rawB[leftOff];
-            float yRight2 = 0.2126f * rawR[rightOff] + 0.7152f * rawG[rightOff] + 0.0722f * rawB[rightOff];
-            float edgeY = yCenter - 0.5f * (yLeft2 + yRight2);
-            float sharpenGain = 0.30f + 0.20f * (1.0f - chromaStrength);
-            float ySharp = std::clamp(yCenter + edgeY * sharpenGain, 0.0f, 1.0f);
-
-            // Inject sharpened luma without scaling structural chroma to prevent edge aberrations
-            finalR = std::clamp(ySharp + (filtR - filtY) * chromaStrength, 0.0f, 1.0f);
-            finalG = std::clamp(ySharp + (filtG - filtY) * chromaStrength, 0.0f, 1.0f);
-            finalB = std::clamp(ySharp + (filtB - filtY) * chromaStrength, 0.0f, 1.0f);
-
-            float wLuma = std::min({finalR, finalG, finalB});
-            if (wLuma > 0.0f) {
-                float wBleed = wLuma * cfg.woledCrossTalkReduction * edgeFactor;
-                float currentLuma = getLuma(finalR, finalG, finalB);
-                if (currentLuma > 0.0f) {
-                    float scale = (currentLuma - wBleed) / currentLuma;
-                    finalR *= scale;
-                    finalG *= scale;
-                    finalB *= scale;
+            for (int px = 0; px < pixelWidth; ++px) {
+                int p = px * 4;
+                float a[4];
+                for (int slot = 0; slot < 4; ++slot) {
+                    float sum = 0.0f;
+                    for (int i = 0; i < 7; ++i) {
+                        int srcP = std::clamp(p + slot + i - 3, 0, (pixelWidth * 4) - 1);
+                        sum += cov4X[srcP] * FILTER_WEIGHTS[i];
+                    }
+                    a[slot] = sum;
                 }
-            }
-            finalR = applyStemDarkening(std::clamp(finalR, 0.0f, 1.0f), darkenAmount);
-            finalG = applyStemDarkening(std::clamp(finalG, 0.0f, 1.0f), darkenAmount);
-            finalB = applyStemDarkening(std::clamp(finalB, 0.0f, 1.0f), darkenAmount);
 
-            finalR = std::clamp(finalR, 0.0f, 1.0f);
-            finalG = std::clamp(finalG, 0.0f, 1.0f);
-            finalB = std::clamp(finalB, 0.0f, 1.0f);
-            float alpha = std::max({finalR, finalG, finalB});
+                float alpha_r, alpha_w, alpha_b, alpha_g;
+                if (cfg.panelType == PanelType::RWBG) {
+                    alpha_r = a[0]; alpha_w = a[1]; alpha_b = a[2]; alpha_g = a[3];
+                } else { // RGWB
+                    alpha_r = a[0]; alpha_g = a[1]; alpha_w = a[2]; alpha_b = a[3];
+                }
 
-            uint8_t* out = result.data.data() + y * result.pitch + px * 4;
-            if (cfg.panelType == PanelType::RWBG) {
-                out[0] = linearToSRGB(finalG);
-                out[1] = linearToSRGB(finalB);
-                out[2] = linearToSRGB(finalR);
-            } else {
-                out[0] = linearToSRGB(finalB);
-                out[1] = linearToSRGB(finalG);
-                out[2] = linearToSRGB(finalR);
+                // Since OLED text output requires R, G, B logical targets that effectively merge W,
+                // and because W = min(R,G,B), by pushing physical W's light energy identically into R, G, B
+                // the display's internal WOLED conversion hardware exactly re-extracts the W correctly.
+                float final_r = std::clamp(alpha_r + alpha_w, 0.0f, 1.0f);
+                float final_g = std::clamp(alpha_g + alpha_w, 0.0f, 1.0f);
+                float final_b = std::clamp(alpha_b + alpha_w, 0.0f, 1.0f);
+
+                final_r = applyStemDarkening(final_r, darkenAmount);
+                final_g = applyStemDarkening(final_g, darkenAmount);
+                final_b = applyStemDarkening(final_b, darkenAmount);
+
+                final_r = std::clamp(final_r, 0.0f, 1.0f);
+                final_g = std::clamp(final_g, 0.0f, 1.0f);
+                final_b = std::clamp(final_b, 0.0f, 1.0f);
+
+                float alpha = std::max({final_r, final_g, final_b});
+
+                uint8_t* out = result.data.data() + y * result.pitch + px * 4;
+                out[0] = linearToSRGB(final_b);
+                out[1] = linearToSRGB(final_g);
+                out[2] = linearToSRGB(final_r);
+                out[3] = static_cast<uint8_t>(alpha * 255.0f + 0.5f);
             }
-            out[3] = static_cast<uint8_t>(std::clamp(alpha, 0.0f, 1.0f) * 255.0f + 0.5f);
         }
-    }
-
+        
+    GetFilteredGlyphCache().Put(cacheKey, result);
     return result;
-}
-
-inline float SampleContinuousX(const uint8_t* row, float fx, int width3x) {
-    int x0 = std::clamp(static_cast<int>(fx), 0, width3x - 1);
-    int x1 = std::clamp(x0 + 1, 0, width3x - 1);
-    float t = fx - static_cast<float>(x0);
-    return sRGBToLinear(row[x0]) * (1.0f - t) + sRGBToLinear(row[x1]) * t;
 }
 
 RGBABitmap TriangularFilter::Apply(const GlyphBitmap& glyph,
@@ -511,6 +303,11 @@ RGBABitmap TriangularFilter::Apply(const GlyphBitmap& glyph,
         {0.05f, 0.28f, 0.01f},
     };
 
+    // Pure 1D horizontal masks for sharp rendering on small text
+    constexpr float kR_1D[3] = {0.03f, 0.44f, 0.09f};
+    constexpr float kG_1D[3] = {0.06f, 0.44f, 0.06f};
+    constexpr float kB_1D[3] = {0.09f, 0.44f, 0.03f};
+
     constexpr float kRsum = 0.90f;
     constexpr float kGsum = 0.90f;
     constexpr float kBsum = 0.90f;
@@ -521,6 +318,32 @@ RGBABitmap TriangularFilter::Apply(const GlyphBitmap& glyph,
     const float darkenAmount = cfg.stemDarkeningEnabled
         ? computeDarkenAmount(emSize, cfg.stemDarkeningStrength)
         : 0.0f;
+
+    // Blend factor: 0.0 = pure 1D (small text), 1.0 = full 2D (large text)
+    const float blend2D = ComputeLodRelax(emSize, cfg.lodThresholdSmall, cfg.lodThresholdLarge);
+
+    float dynR[3][3], dynG[3][3], dynB[3][3];
+    float dynRsum = 0.0f, dynGsum = 0.0f, dynBsum = 0.0f;
+
+    for (int ky = -1; ky <= 1; ++ky) {
+        for (int kx = -1; kx <= 1; ++kx) {
+            float wR_1D = (ky == 0) ? kR_1D[kx + 1] : 0.0f;
+            float wG_1D = (ky == 0) ? kG_1D[kx + 1] : 0.0f;
+            float wB_1D = (ky == 0) ? kB_1D[kx + 1] : 0.0f;
+
+            dynR[ky + 1][kx + 1] = wR_1D * (1.0f - blend2D) + kR[ky + 1][kx + 1] * blend2D;
+            dynG[ky + 1][kx + 1] = wG_1D * (1.0f - blend2D) + kG[ky + 1][kx + 1] * blend2D;
+            dynB[ky + 1][kx + 1] = wB_1D * (1.0f - blend2D) + kB[ky + 1][kx + 1] * blend2D;
+
+            dynRsum += dynR[ky + 1][kx + 1];
+            dynGsum += dynG[ky + 1][kx + 1];
+            dynBsum += dynB[ky + 1][kx + 1];
+        }
+    }
+
+    if (dynRsum < 1e-6f) dynRsum = 1.0f;
+    if (dynGsum < 1e-6f) dynGsum = 1.0f;
+    if (dynBsum < 1e-6f) dynBsum = 1.0f;
 
     auto sampleLinear = [&](int sx, int sy) -> float {
         if (sx < 0 || sx >= glyph.width || sy < 0 || sy >= height) return 0.0f;
@@ -575,15 +398,15 @@ RGBABitmap TriangularFilter::Apply(const GlyphBitmap& glyph,
                     int nx = std::clamp(px + kx, 0, pixelWidth - 1);
                     int srcOff = ny * pixelWidth + nx;
 
-                    filtR += rawR[srcOff] * kR[ky + 1][kx + 1];
-                    filtG += rawG[srcOff] * kG[ky + 1][kx + 1];
-                    filtB += rawB[srcOff] * kB[ky + 1][kx + 1];
+                    filtR += rawR[srcOff] * dynR[ky + 1][kx + 1];
+                    filtG += rawG[srcOff] * dynG[ky + 1][kx + 1];
+                    filtB += rawB[srcOff] * dynB[ky + 1][kx + 1];
                 }
             }
 
-            filtR /= kRsum;
-            filtG /= kGsum;
-            filtB /= kBsum;
+            filtR /= dynRsum;
+            filtG /= dynGsum;
+            filtB /= dynBsum;
 
             int off = y * pixelWidth + px;
             

@@ -161,7 +161,7 @@ const GlyphBitmap* FTRasterizer::RasterizeGlyph(
         loadFlags |= FT_LOAD_FORCE_AUTOHINT;
     }
 
-    // Both WRGB and RWBG share the exact same physical luminance structure (White core).
+    // Both RGWB and RWBG share the exact same physical luminance structure (White core).
     FT_Pos oledPhaseX = (cfg.panelType == PanelType::QD_OLED_TRIANGLE) ? 32 : 24;
     FT_Pos oledPhaseY = (cfg.panelType == PanelType::QD_OLED_TRIANGLE) ? 21 : 0;
 

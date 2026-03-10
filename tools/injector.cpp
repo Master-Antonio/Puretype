@@ -27,8 +27,9 @@ static const UINT WM_TRAYICON            = WM_APP + 1;
 
 static const UINT IDM_ENABLE      = 1001;
 static const UINT IDM_DISABLE     = 1002;
-static const UINT IDM_PANEL_WRGB  = 1010;
-static const UINT IDM_PANEL_QDOLED= 1011;
+static const UINT IDM_PANEL_QDOLED= 1010;
+static const UINT IDM_PANEL_RWBG  = 1011;
+static const UINT IDM_PANEL_RGWB  = 1012;
 static const UINT IDM_EXIT        = 1099;
 
 static HINSTANCE g_hInstance   = nullptr;
@@ -39,6 +40,10 @@ static bool      g_hookActive = false;
 static NOTIFYICONDATAW g_nid  = {};
 
 static int g_panelType = 0;
+static bool g_clearTypeWasEnabled = false;
+
+static bool SetClearTypeState(bool enable);
+static bool GetClearTypeState();
 
 static std::wstring GetDllPath();
 static std::wstring GetIniPath();
@@ -53,22 +58,56 @@ static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 static void LoadPanelTypeFromIni() {
     std::wstring iniPath = GetIniPath();
     wchar_t buf[64] = {};
-    GetPrivateProfileStringW(L"General", L"PanelType", L"WRGB",
+    GetPrivateProfileStringW(L"General", L"PanelType", L"RWBG",
                               buf, ARRAYSIZE(buf), iniPath.c_str());
 
     std::wstring val(buf);
 
     for (auto& c : val) c = towupper(c);
     if (val == L"QD_OLED_TRIANGLE") {
-        g_panelType = 1;
-    } else {
         g_panelType = 0;
+    } else if (val == L"RWBG") {
+        g_panelType = 1;
+    } else if (val == L"RGWB") {
+        g_panelType = 2;
+    } else {
+        g_panelType = 1;
     }
+}
+
+static bool GetClearTypeState() {
+    BOOL isSmoothingEnabled = FALSE;
+    BOOL isClearTypeEnabled = FALSE;
+    
+    SystemParametersInfoW(SPI_GETFONTSMOOTHING, 0, &isSmoothingEnabled, 0);
+    if (isSmoothingEnabled) {
+        SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE, 0, &isClearTypeEnabled, 0);
+        return isClearTypeEnabled == FE_FONTSMOOTHINGCLEARTYPE;
+    }
+    return false;
+}
+
+static bool SetClearTypeState(bool enable) {
+    BOOL result = FALSE;
+    if (enable) {
+        // Enable font smoothing and set it to ClearType
+        SystemParametersInfoW(SPI_SETFONTSMOOTHING, TRUE, 0, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+        result = SystemParametersInfoW(SPI_SETFONTSMOOTHINGTYPE, 0, (PVOID)FE_FONTSMOOTHINGCLEARTYPE, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+    } else {
+        // Set font smoothing to Standard (Grayscale) or disable smoothing completely
+        // Here we just switch from ClearType to Standard anti-aliasing to preserve basic smoothing
+        SystemParametersInfoW(SPI_SETFONTSMOOTHING, TRUE, 0, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+        result = SystemParametersInfoW(SPI_SETFONTSMOOTHINGTYPE, 0, (PVOID)FE_FONTSMOOTHINGSTANDARD, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+    }
+    return result != FALSE;
 }
 
 static void SavePanelTypeToIni(int panelType) {
     std::wstring iniPath = GetIniPath();
-    const wchar_t* value = (panelType == 1) ? L"QD_OLED_TRIANGLE" : L"WRGB";
+    const wchar_t* value = L"RWBG";
+    if (panelType == 0) value = L"QD_OLED_TRIANGLE";
+    else if (panelType == 2) value = L"RGWB";
+    
     WritePrivateProfileStringW(L"General", L"PanelType", value, iniPath.c_str());
     g_panelType = panelType;
 }
@@ -214,6 +253,12 @@ static bool EnableHook() {
     }
 
     g_hookActive = true;
+    
+    // Disable Windows ClearType
+    g_clearTypeWasEnabled = GetClearTypeState();
+    if (g_clearTypeWasEnabled) {
+        SetClearTypeState(false);
+    }
 
     StringCchCopyW(g_nid.szTip, ARRAYSIZE(g_nid.szTip), L"PureType - Active");
     Shell_NotifyIconW(NIM_MODIFY, &g_nid);
@@ -235,6 +280,11 @@ static void DisableHook() {
     }
 
     g_hookActive = false;
+
+    // Restore Windows ClearType if it was enabled before
+    if (g_clearTypeWasEnabled) {
+        SetClearTypeState(true);
+    }
 
     StringCchCopyW(g_nid.szTip, ARRAYSIZE(g_nid.szTip), L"PureType - Disabled");
     Shell_NotifyIconW(NIM_MODIFY, &g_nid);
@@ -280,9 +330,11 @@ static void ShowTrayMenu(HWND hWnd) {
 
     HMENU hPanelMenu = CreatePopupMenu();
     AppendMenuW(hPanelMenu, MF_STRING | (g_panelType == 0 ? MF_CHECKED : 0),
-                IDM_PANEL_WRGB,   L"LG WRGB (WOLED)");
-    AppendMenuW(hPanelMenu, MF_STRING | (g_panelType == 1 ? MF_CHECKED : 0),
                 IDM_PANEL_QDOLED, L"Samsung QD-OLED (Triangular)");
+    AppendMenuW(hPanelMenu, MF_STRING | (g_panelType == 1 ? MF_CHECKED : 0),
+                IDM_PANEL_RWBG,   L"LG WOLED (RWBG)");
+    AppendMenuW(hPanelMenu, MF_STRING | (g_panelType == 2 ? MF_CHECKED : 0),
+                IDM_PANEL_RGWB,   L"LG WOLED (RGWB)");
 
     AppendMenuW(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hPanelMenu),
                 L"Panel Type");
@@ -319,20 +371,17 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         case IDM_DISABLE:
             DisableHook();
             break;
-        case IDM_PANEL_WRGB:
-            SavePanelTypeToIni(0);
-
-            if (g_hookActive) {
-                DisableHook();
-                EnableHook();
-            }
-            break;
         case IDM_PANEL_QDOLED:
+            SavePanelTypeToIni(0);
+            if (g_hookActive) { DisableHook(); EnableHook(); }
+            break;
+        case IDM_PANEL_RWBG:
             SavePanelTypeToIni(1);
-            if (g_hookActive) {
-                DisableHook();
-                EnableHook();
-            }
+            if (g_hookActive) { DisableHook(); EnableHook(); }
+            break;
+        case IDM_PANEL_RGWB:
+            SavePanelTypeToIni(2);
+            if (g_hookActive) { DisableHook(); EnableHook(); }
             break;
         case IDM_EXIT:
             DisableHook();
