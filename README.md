@@ -55,18 +55,52 @@ UWP apps (Calculator, Settings, the new Notepad) work out of the box — the inj
 
 Edit `puretype.ini`:
 
+QD-OLED
 ```ini
 [General]
-PanelType=QD_OLED_TRIANGLE    ; or WRGB
-FilterStrength=1.0             ; 0.0–1.0, chroma retention
-Gamma=1.0                      ; fine-tune exponent on top of sRGB
+PanelType=QD_OLED_TRIANGLE
+FilterStrength=1.0
+Gamma=1.0
+EnableSubpixelHinting=true
+EnableFractionalPositioning=true
+LODThresholdSmall=12.0
+LODThresholdLarge=24.0
+WOLEDCrossTalkReduction=0.0 
+LumaContrastStrength=1.25
 StemDarkeningEnabled=true
-StemDarkeningStrength=0.4      ; 0.0–1.0, how much thin strokes are boosted
+StemDarkeningStrength=0.35
+```
 
-[Debug]
-Enabled=false
-LogFile=puretype.log
-HighlightRenderedGlyphs=false  ; tints rendered glyphs so you can see what's hooked
+RWBG
+```ini
+[General]
+PanelType=RWBG 
+FilterStrength=1.0
+Gamma=1.0
+EnableSubpixelHinting=true
+EnableFractionalPositioning=true
+LODThresholdSmall=12.0
+LODThresholdLarge=24.0
+WOLEDCrossTalkReduction=0.12 
+LumaContrastStrength=1.45
+StemDarkeningEnabled=true
+StemDarkeningStrength=0.45
+```
+
+RGWB
+```ini
+[General]
+PanelType=RGWB
+FilterStrength=1.0
+Gamma=1.0
+EnableSubpixelHinting=true
+EnableFractionalPositioning=true
+LODThresholdSmall=12.0
+LODThresholdLarge=24.0
+WOLEDCrossTalkReduction=0.10 
+LumaContrastStrength=1.40
+StemDarkeningEnabled=true
+StemDarkeningStrength=0.45
 ```
 
 `Gamma` is **not** the display gamma — it's an optional exponent applied on top of the sRGB transfer curve. Leave it at 1.0 unless you have a specific reason to change it.
