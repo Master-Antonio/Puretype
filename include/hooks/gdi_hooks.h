@@ -1,13 +1,13 @@
-
-
 #pragma once
 
 #include <Windows.h>
 
-namespace puretype { namespace hooks {
+namespace puretype
+{
+    namespace hooks
+    {
+        bool InstallGDIHooks();
 
-bool InstallGDIHooks();
-
-void RemoveGDIHooks();
-
-}}
+        void RemoveGDIHooks();
+    }
+}

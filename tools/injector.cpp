@@ -1,5 +1,3 @@
-
-
 #ifndef UNICODE
 #define UNICODE
 #endif
@@ -23,21 +21,21 @@
 
 static const wchar_t* const kWindowClass = L"PureTypeTrayWindow";
 static const wchar_t* const kWindowTitle = L"PureType";
-static const UINT WM_TRAYICON            = WM_APP + 1;
+static const UINT WM_TRAYICON = WM_APP + 1;
 
-static const UINT IDM_ENABLE      = 1001;
-static const UINT IDM_DISABLE     = 1002;
-static const UINT IDM_PANEL_QDOLED= 1010;
-static const UINT IDM_PANEL_RWBG  = 1011;
-static const UINT IDM_PANEL_RGWB  = 1012;
-static const UINT IDM_EXIT        = 1099;
+static const UINT IDM_ENABLE = 1001;
+static const UINT IDM_DISABLE = 1002;
+static const UINT IDM_PANEL_QDOLED = 1010;
+static const UINT IDM_PANEL_RWBG = 1011;
+static const UINT IDM_PANEL_RGWB = 1012;
+static const UINT IDM_EXIT = 1099;
 
-static HINSTANCE g_hInstance   = nullptr;
-static HWND      g_hWnd       = nullptr;
-static HHOOK     g_hCBTHook   = nullptr;
-static HMODULE   g_hDll       = nullptr;
-static bool      g_hookActive = false;
-static NOTIFYICONDATAW g_nid  = {};
+static HINSTANCE g_hInstance = nullptr;
+static HWND g_hWnd = nullptr;
+static HHOOK g_hCBTHook = nullptr;
+static HMODULE g_hDll = nullptr;
+static bool g_hookActive = false;
+static NOTIFYICONDATAW g_nid = {};
 
 static int g_panelType = 0;
 static bool g_clearTypeWasEnabled = false;
@@ -55,77 +53,96 @@ static void RemoveTrayIcon();
 static void ShowTrayMenu(HWND hWnd);
 static LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 
-static void LoadPanelTypeFromIni() {
+static void LoadPanelTypeFromIni()
+{
     std::wstring iniPath = GetIniPath();
     wchar_t buf[64] = {};
     GetPrivateProfileStringW(L"General", L"PanelType", L"RWBG",
-                              buf, ARRAYSIZE(buf), iniPath.c_str());
+                             buf, ARRAYSIZE(buf), iniPath.c_str());
 
     std::wstring val(buf);
 
     for (auto& c : val) c = towupper(c);
-    if (val == L"QD_OLED_TRIANGLE") {
+    if (val == L"QD_OLED_TRIANGLE")
+    {
         g_panelType = 0;
-    } else if (val == L"RWBG") {
+    }
+    else if (val == L"RWBG")
+    {
         g_panelType = 1;
-    } else if (val == L"RGWB") {
+    }
+    else if (val == L"RGWB")
+    {
         g_panelType = 2;
-    } else {
+    }
+    else
+    {
         g_panelType = 1;
     }
 }
 
-static bool GetClearTypeState() {
+static bool GetClearTypeState()
+{
     BOOL isSmoothingEnabled = FALSE;
     BOOL isClearTypeEnabled = FALSE;
-    
+
     SystemParametersInfoW(SPI_GETFONTSMOOTHING, 0, &isSmoothingEnabled, 0);
-    if (isSmoothingEnabled) {
+    if (isSmoothingEnabled)
+    {
         SystemParametersInfoW(SPI_GETFONTSMOOTHINGTYPE, 0, &isClearTypeEnabled, 0);
         return isClearTypeEnabled == FE_FONTSMOOTHINGCLEARTYPE;
     }
     return false;
 }
 
-static bool SetClearTypeState(bool enable) {
+static bool SetClearTypeState(bool enable)
+{
     BOOL result = FALSE;
-    if (enable) {
+    if (enable)
+    {
         // Enable font smoothing and set it to ClearType
         SystemParametersInfoW(SPI_SETFONTSMOOTHING, TRUE, 0, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
-        result = SystemParametersInfoW(SPI_SETFONTSMOOTHINGTYPE, 0, (PVOID)FE_FONTSMOOTHINGCLEARTYPE, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
-    } else {
+        result = SystemParametersInfoW(SPI_SETFONTSMOOTHINGTYPE, 0, (PVOID)FE_FONTSMOOTHINGCLEARTYPE,
+                                       SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+    }
+    else
+    {
         // Set font smoothing to Standard (Grayscale) or disable smoothing completely
         // Here we just switch from ClearType to Standard anti-aliasing to preserve basic smoothing
         SystemParametersInfoW(SPI_SETFONTSMOOTHING, TRUE, 0, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
-        result = SystemParametersInfoW(SPI_SETFONTSMOOTHINGTYPE, 0, (PVOID)FE_FONTSMOOTHINGSTANDARD, SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
+        result = SystemParametersInfoW(SPI_SETFONTSMOOTHINGTYPE, 0, (PVOID)FE_FONTSMOOTHINGSTANDARD,
+                                       SPIF_UPDATEINIFILE | SPIF_SENDCHANGE);
     }
     return result != FALSE;
 }
 
-static void SavePanelTypeToIni(int panelType) {
+static void SavePanelTypeToIni(int panelType)
+{
     std::wstring iniPath = GetIniPath();
     const wchar_t* value = L"RWBG";
     if (panelType == 0) value = L"QD_OLED_TRIANGLE";
     else if (panelType == 2) value = L"RGWB";
-    
+
     WritePrivateProfileStringW(L"General", L"PanelType", value, iniPath.c_str());
     g_panelType = panelType;
 }
 
-static bool GrantACLForSid(const std::wstring& filePath, const wchar_t* sidString) {
+static bool GrantACLForSid(const std::wstring& filePath, const wchar_t* sidString)
+{
     PSID pSid = nullptr;
-    if (!ConvertStringSidToSidW(sidString, &pSid)) {
+    if (!ConvertStringSidToSidW(sidString, &pSid))
+    {
         return false;
     }
 
     EXPLICIT_ACCESSW ea = {};
     // AppContainer processes need RX on DLL/INI for global hook injection to work.
     ea.grfAccessPermissions = GENERIC_READ | GENERIC_EXECUTE;
-    ea.grfAccessMode        = SET_ACCESS;
-    ea.grfInheritance       = NO_INHERITANCE;
-    ea.Trustee.TrusteeForm  = TRUSTEE_IS_SID;
-    ea.Trustee.TrusteeType  = TRUSTEE_IS_WELL_KNOWN_GROUP;
-    ea.Trustee.ptstrName    = reinterpret_cast<LPWSTR>(pSid);
+    ea.grfAccessMode = SET_ACCESS;
+    ea.grfInheritance = NO_INHERITANCE;
+    ea.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    ea.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    ea.Trustee.ptstrName = reinterpret_cast<LPWSTR>(pSid);
 
     PACL pOldDacl = nullptr;
     PSECURITY_DESCRIPTOR pSD = nullptr;
@@ -138,14 +155,16 @@ static bool GrantACLForSid(const std::wstring& filePath, const wchar_t* sidStrin
         nullptr,
         &pSD);
 
-    if (result != ERROR_SUCCESS) {
+    if (result != ERROR_SUCCESS)
+    {
         LocalFree(pSid);
         return false;
     }
 
     PACL pNewDacl = nullptr;
     result = SetEntriesInAclW(1, &ea, pOldDacl, &pNewDacl);
-    if (result != ERROR_SUCCESS) {
+    if (result != ERROR_SUCCESS)
+    {
         LocalFree(pSD);
         LocalFree(pSid);
         return false;
@@ -166,11 +185,13 @@ static bool GrantACLForSid(const std::wstring& filePath, const wchar_t* sidStrin
     return (result == ERROR_SUCCESS);
 }
 
-static bool GrantUWPPermissions(const std::wstring& filePath) {
+static bool GrantUWPPermissions(const std::wstring& filePath)
+{
     bool ok = true;
 
     // ALL APPLICATION PACKAGES
-    if (!GrantACLForSid(filePath, L"S-1-15-2-1")) {
+    if (!GrantACLForSid(filePath, L"S-1-15-2-1"))
+    {
         ok = false;
     }
 
@@ -184,55 +205,63 @@ static bool GrantUWPPermissions(const std::wstring& filePath) {
     return ok;
 }
 
-static std::wstring GetExeDir() {
+static std::wstring GetExeDir()
+{
     wchar_t exePath[MAX_PATH] = {};
     GetModuleFileNameW(nullptr, exePath, MAX_PATH);
     std::wstring path(exePath);
     auto pos = path.find_last_of(L"\\/");
-    if (pos != std::wstring::npos) {
+    if (pos != std::wstring::npos)
+    {
         path = path.substr(0, pos + 1);
     }
     return path;
 }
 
-static std::wstring GetDllPath() {
+static std::wstring GetDllPath()
+{
     return GetExeDir() + L"PureType.dll";
 }
 
-static std::wstring GetIniPath() {
+static std::wstring GetIniPath()
+{
     return GetExeDir() + L"puretype.ini";
 }
 
-static bool EnableHook() {
+static bool EnableHook()
+{
     if (g_hookActive) return true;
 
     std::wstring dllPath = GetDllPath();
 
-    if (GetFileAttributesW(dllPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
+    if (GetFileAttributesW(dllPath.c_str()) == INVALID_FILE_ATTRIBUTES)
+    {
         MessageBoxW(nullptr,
-            L"PureType.dll not found next to puretype.exe.",
-            L"PureType Error", MB_OK | MB_ICONERROR);
+                    L"PureType.dll not found next to puretype.exe.",
+                    L"PureType Error", MB_OK | MB_ICONERROR);
         return false;
     }
 
     GrantUWPPermissions(dllPath);
 
     g_hDll = LoadLibraryW(dllPath.c_str());
-    if (!g_hDll) {
+    if (!g_hDll)
+    {
         MessageBoxW(nullptr,
-            L"Failed to load PureType.dll.\n"
-            L"Check that all dependencies are present.",
-            L"PureType Error", MB_OK | MB_ICONERROR);
+                    L"Failed to load PureType.dll.\n"
+                    L"Check that all dependencies are present.",
+                    L"PureType Error", MB_OK | MB_ICONERROR);
         return false;
     }
 
     auto hookProc = reinterpret_cast<HOOKPROC>(
         GetProcAddress(g_hDll, "PureTypeCBTProc"));
-    if (!hookProc) {
+    if (!hookProc)
+    {
         MessageBoxW(nullptr,
-            L"PureTypeCBTProc export not found in PureType.dll.\n"
-            L"The DLL may be an older version.",
-            L"PureType Error", MB_OK | MB_ICONERROR);
+                    L"PureTypeCBTProc export not found in PureType.dll.\n"
+                    L"The DLL may be an older version.",
+                    L"PureType Error", MB_OK | MB_ICONERROR);
         FreeLibrary(g_hDll);
         g_hDll = nullptr;
         return false;
@@ -240,12 +269,13 @@ static bool EnableHook() {
 
     // threadId=0 installs a desktop-wide hook.
     g_hCBTHook = SetWindowsHookExW(WH_CBT, hookProc, g_hDll, 0);
-    if (!g_hCBTHook) {
+    if (!g_hCBTHook)
+    {
         DWORD err = GetLastError();
         wchar_t msg[256];
         StringCchPrintfW(msg, 256,
-            L"SetWindowsHookEx failed (error %lu).\n"
-            L"Try running as Administrator.", err);
+                         L"SetWindowsHookEx failed (error %lu).\n"
+                         L"Try running as Administrator.", err);
         MessageBoxW(nullptr, msg, L"PureType Error", MB_OK | MB_ICONERROR);
         FreeLibrary(g_hDll);
         g_hDll = nullptr;
@@ -253,10 +283,11 @@ static bool EnableHook() {
     }
 
     g_hookActive = true;
-    
+
     // Disable Windows ClearType
     g_clearTypeWasEnabled = GetClearTypeState();
-    if (g_clearTypeWasEnabled) {
+    if (g_clearTypeWasEnabled)
+    {
         SetClearTypeState(false);
     }
 
@@ -266,15 +297,18 @@ static bool EnableHook() {
     return true;
 }
 
-static void DisableHook() {
+static void DisableHook()
+{
     if (!g_hookActive) return;
 
-    if (g_hCBTHook) {
+    if (g_hCBTHook)
+    {
         UnhookWindowsHookEx(g_hCBTHook);
         g_hCBTHook = nullptr;
     }
 
-    if (g_hDll) {
+    if (g_hDll)
+    {
         FreeLibrary(g_hDll);
         g_hDll = nullptr;
     }
@@ -282,7 +316,8 @@ static void DisableHook() {
     g_hookActive = false;
 
     // Restore Windows ClearType if it was enabled before
-    if (g_clearTypeWasEnabled) {
+    if (g_clearTypeWasEnabled)
+    {
         SetClearTypeState(true);
     }
 
@@ -290,18 +325,19 @@ static void DisableHook() {
     Shell_NotifyIconW(NIM_MODIFY, &g_nid);
 }
 
-static void CreateTrayIcon(HWND hWnd) {
+static void CreateTrayIcon(HWND hWnd)
+{
     ZeroMemory(&g_nid, sizeof(g_nid));
-    g_nid.cbSize           = sizeof(NOTIFYICONDATAW);
-    g_nid.hWnd             = hWnd;
-    g_nid.uID              = 1;
-    g_nid.uFlags           = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_nid.cbSize = sizeof(NOTIFYICONDATAW);
+    g_nid.hWnd = hWnd;
+    g_nid.uID = 1;
+    g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_nid.uCallbackMessage = WM_TRAYICON;
 
     g_nid.hIcon = LoadIconW(g_hInstance,
-                             MAKEINTRESOURCEW(IDI_PURETYPE_ICON));
-    if (!g_nid.hIcon) {
-
+                            MAKEINTRESOURCEW(IDI_PURETYPE_ICON));
+    if (!g_nid.hIcon)
+    {
         g_nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
     }
 
@@ -310,20 +346,25 @@ static void CreateTrayIcon(HWND hWnd) {
     Shell_NotifyIconW(NIM_ADD, &g_nid);
 }
 
-static void RemoveTrayIcon() {
+static void RemoveTrayIcon()
+{
     Shell_NotifyIconW(NIM_DELETE, &g_nid);
 }
 
-static void ShowTrayMenu(HWND hWnd) {
+static void ShowTrayMenu(HWND hWnd)
+{
     HMENU hMenu = CreatePopupMenu();
     if (!hMenu) return;
 
-    if (g_hookActive) {
-        AppendMenuW(hMenu, MF_STRING | MF_GRAYED, IDM_ENABLE,  L"PureType Enabled");
-        AppendMenuW(hMenu, MF_STRING,              IDM_DISABLE, L"Disable PureType");
-    } else {
-        AppendMenuW(hMenu, MF_STRING,              IDM_ENABLE,  L"Enable PureType");
-        AppendMenuW(hMenu, MF_STRING | MF_GRAYED,  IDM_DISABLE, L"PureType Disabled");
+    if (g_hookActive)
+    {
+        AppendMenuW(hMenu, MF_STRING | MF_GRAYED, IDM_ENABLE, L"PureType Enabled");
+        AppendMenuW(hMenu, MF_STRING, IDM_DISABLE, L"Disable PureType");
+    }
+    else
+    {
+        AppendMenuW(hMenu, MF_STRING, IDM_ENABLE, L"Enable PureType");
+        AppendMenuW(hMenu, MF_STRING | MF_GRAYED, IDM_DISABLE, L"PureType Disabled");
     }
 
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
@@ -332,9 +373,9 @@ static void ShowTrayMenu(HWND hWnd) {
     AppendMenuW(hPanelMenu, MF_STRING | (g_panelType == 0 ? MF_CHECKED : 0),
                 IDM_PANEL_QDOLED, L"Samsung QD-OLED (Triangular)");
     AppendMenuW(hPanelMenu, MF_STRING | (g_panelType == 1 ? MF_CHECKED : 0),
-                IDM_PANEL_RWBG,   L"LG WOLED (RWBG)");
+                IDM_PANEL_RWBG, L"LG WOLED (RWBG)");
     AppendMenuW(hPanelMenu, MF_STRING | (g_panelType == 2 ? MF_CHECKED : 0),
-                IDM_PANEL_RGWB,   L"LG WOLED (RGWB)");
+                IDM_PANEL_RGWB, L"LG WOLED (RGWB)");
 
     AppendMenuW(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hPanelMenu),
                 L"Panel Type");
@@ -354,17 +395,20 @@ static void ShowTrayMenu(HWND hWnd) {
     DestroyMenu(hMenu);
 }
 
-static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    switch (msg) {
-
+static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg)
+    {
     case WM_TRAYICON:
-        if (LOWORD(lParam) == WM_RBUTTONUP || LOWORD(lParam) == WM_CONTEXTMENU) {
+        if (LOWORD(lParam) == WM_RBUTTONUP || LOWORD(lParam) == WM_CONTEXTMENU)
+        {
             ShowTrayMenu(hWnd);
         }
         return 0;
 
     case WM_COMMAND:
-        switch (LOWORD(wParam)) {
+        switch (LOWORD(wParam))
+        {
         case IDM_ENABLE:
             EnableHook();
             break;
@@ -373,15 +417,27 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             break;
         case IDM_PANEL_QDOLED:
             SavePanelTypeToIni(0);
-            if (g_hookActive) { DisableHook(); EnableHook(); }
+            if (g_hookActive)
+            {
+                DisableHook();
+                EnableHook();
+            }
             break;
         case IDM_PANEL_RWBG:
             SavePanelTypeToIni(1);
-            if (g_hookActive) { DisableHook(); EnableHook(); }
+            if (g_hookActive)
+            {
+                DisableHook();
+                EnableHook();
+            }
             break;
         case IDM_PANEL_RGWB:
             SavePanelTypeToIni(2);
-            if (g_hookActive) { DisableHook(); EnableHook(); }
+            if (g_hookActive)
+            {
+                DisableHook();
+                EnableHook();
+            }
             break;
         case IDM_EXIT:
             DisableHook();
@@ -402,23 +458,25 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
     }
 }
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
+int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
+{
     g_hInstance = hInstance;
 
     HANDLE hMutex = CreateMutexW(nullptr, TRUE, L"PureType_Executable_Mutex");
-    if (GetLastError() == ERROR_ALREADY_EXISTS) {
+    if (GetLastError() == ERROR_ALREADY_EXISTS)
+    {
         MessageBoxW(nullptr,
-            L"PureType is already running.",
-            L"PureType", MB_OK | MB_ICONINFORMATION);
+                    L"PureType is already running.",
+                    L"PureType", MB_OK | MB_ICONINFORMATION);
         return 0;
     }
 
     LoadPanelTypeFromIni();
 
     WNDCLASSW wc = {};
-    wc.lpfnWndProc   = WndProc;
-    wc.hInstance      = hInstance;
-    wc.lpszClassName  = kWindowClass;
+    wc.lpfnWndProc = WndProc;
+    wc.hInstance = hInstance;
+    wc.lpszClassName = kWindowClass;
     RegisterClassW(&wc);
 
     // Message-only window keeps the app off taskbar/Alt-Tab.
@@ -427,7 +485,8 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
         0, 0, 0, 0, 0,
         HWND_MESSAGE, nullptr, hInstance, nullptr);
 
-    if (!g_hWnd) {
+    if (!g_hWnd)
+    {
         MessageBoxW(nullptr, L"Failed to create message window.",
                     L"PureType Error", MB_OK | MB_ICONERROR);
         return 1;
@@ -438,12 +497,14 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     EnableHook();
 
     MSG msg;
-    while (GetMessageW(&msg, nullptr, 0, 0)) {
+    while (GetMessageW(&msg, nullptr, 0, 0))
+    {
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
 
-    if (hMutex) {
+    if (hMutex)
+    {
         ReleaseMutex(hMutex);
         CloseHandle(hMutex);
     }

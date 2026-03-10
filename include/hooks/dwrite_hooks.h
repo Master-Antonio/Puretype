@@ -1,14 +1,14 @@
-
-
 #pragma once
 
 #include <dwrite.h>
 #include <d2d1.h>
 
-namespace puretype { namespace hooks {
+namespace puretype
+{
+    namespace hooks
+    {
+        bool InstallDWriteHooks();
 
-bool InstallDWriteHooks();
-
-void RemoveDWriteHooks();
-
-}}
+        void RemoveDWriteHooks();
+    }
+}
