@@ -9,10 +9,141 @@
 #include <algorithm>
 #include <cstring>
 #include <vector>
+#if defined(__SSE2__)
+#include <immintrin.h>
+#endif
 
 extern void PureTypeLog(const char* fmt, ...);
 
 namespace puretype {
+
+namespace {
+
+constexpr float kLumaR = 0.2126f;
+constexpr float kLumaG = 0.7152f;
+constexpr float kLumaB = 0.0722f;
+
+inline float Clamp01(float v) {
+    return std::clamp(v, 0.0f, 1.0f);
+}
+
+void ComputeLumaBuffer(const std::vector<float>& r,
+                       const std::vector<float>& g,
+                       const std::vector<float>& b,
+                       std::vector<float>& y) {
+    const size_t n = r.size();
+    y.resize(n);
+
+#if defined(__SSE2__)
+    const __m128 kr = _mm_set1_ps(kLumaR);
+    const __m128 kg = _mm_set1_ps(kLumaG);
+    const __m128 kb = _mm_set1_ps(kLumaB);
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        const __m128 vr = _mm_loadu_ps(r.data() + i);
+        const __m128 vg = _mm_loadu_ps(g.data() + i);
+        const __m128 vb = _mm_loadu_ps(b.data() + i);
+
+        __m128 vy = _mm_mul_ps(vr, kr);
+        vy = _mm_add_ps(vy, _mm_mul_ps(vg, kg));
+        vy = _mm_add_ps(vy, _mm_mul_ps(vb, kb));
+        _mm_storeu_ps(y.data() + i, vy);
+    }
+    for (; i < n; ++i) {
+        y[i] = kLumaR * r[i] + kLumaG * g[i] + kLumaB * b[i];
+    }
+#else
+    for (size_t i = 0; i < n; ++i) {
+        y[i] = kLumaR * r[i] + kLumaG * g[i] + kLumaB * b[i];
+    }
+#endif
+}
+
+void ApplyLumaContrastSharpenLinear(std::vector<float>& r,
+                                    std::vector<float>& g,
+                                    std::vector<float>& b,
+                                    const std::vector<float>& textMask,
+                                    int width,
+                                    int height,
+                                    float strength,
+                                    bool clampPremultiplied) {
+    if (width <= 0 || height <= 0) return;
+    const size_t count = static_cast<size_t>(width) * static_cast<size_t>(height);
+    if (r.size() != count || g.size() != count || b.size() != count || textMask.size() != count) {
+        return;
+    }
+
+    const float amount = std::max(0.0f, strength - 1.0f);
+    if (amount <= 1e-4f) return;
+
+    thread_local std::vector<float> y;
+    thread_local std::vector<float> ySharp;
+    y.resize(count);
+    ySharp.resize(count);
+
+    ComputeLumaBuffer(r, g, b, y);
+
+    for (int py = 0; py < height; ++py) {
+        for (int px = 0; px < width; ++px) {
+            const size_t idx = static_cast<size_t>(py) * static_cast<size_t>(width) +
+                               static_cast<size_t>(px);
+            const float centerMask = Clamp01(textMask[idx]);
+            if (centerMask <= 1e-3f) {
+                ySharp[idx] = y[idx];
+                continue;
+            }
+
+            float blurSum = 0.0f;
+            float wSum = 0.0f;
+
+            for (int ky = -1; ky <= 1; ++ky) {
+                const int ny = std::clamp(py + ky, 0, height - 1);
+                for (int kx = -1; kx <= 1; ++kx) {
+                    const int nx = std::clamp(px + kx, 0, width - 1);
+                    const size_t nIdx = static_cast<size_t>(ny) * static_cast<size_t>(width) +
+                                        static_cast<size_t>(nx);
+
+                    const float kernel =
+                        ((ky == 0 && kx == 0) ? 4.0f : ((ky == 0 || kx == 0) ? 2.0f : 1.0f));
+                    const float maskWeight = 0.15f + 0.85f * Clamp01(textMask[nIdx]);
+                    const float w = kernel * maskWeight;
+                    blurSum += y[nIdx] * w;
+                    wSum += w;
+                }
+            }
+
+            const float blur = (wSum > 1e-6f) ? (blurSum / wSum) : y[idx];
+            const float edge = y[idx] - blur;
+            ySharp[idx] = Clamp01(y[idx] + edge * amount * centerMask);
+        }
+    }
+
+    for (size_t i = 0; i < count; ++i) {
+        const float baseY = std::max(y[i], 1e-6f);
+        const float scale = ySharp[i] / baseY;
+
+        float outR = r[i] * scale;
+        float outG = g[i] * scale;
+        float outB = b[i] * scale;
+
+        if (clampPremultiplied) {
+            const float alpha = Clamp01(textMask[i]);
+            outR = std::clamp(outR, 0.0f, alpha);
+            outG = std::clamp(outG, 0.0f, alpha);
+            outB = std::clamp(outB, 0.0f, alpha);
+        } else {
+            outR = Clamp01(outR);
+            outG = Clamp01(outG);
+            outB = Clamp01(outB);
+        }
+
+        r[i] = outR;
+        g[i] = outG;
+        b[i] = outB;
+    }
+}
+
+} // namespace
 
 Blender& Blender::Instance() {
     static Blender instance;
@@ -54,7 +185,7 @@ bool Blender::BlitToHDC(HDC hdc, int x, int y,
     const auto& cfg = Config::Instance().Data();
     const bool qdPanel = (cfg.panelType == PanelType::QD_OLED_TRIANGLE);
     const bool nearBlackText = (std::max({textR8, textG8, textB8}) <= 96);
-    const bool grayscaleText = (textR8 == textG8 && textG8 == textB8);
+    //const bool grayscaleText = (textR8 == textG8 && textG8 == textB8);
     const bool tinyText = (bitmap.height <= 18);
     const bool smallText = (bitmap.height <= 24);
     const float sizeBoost =
@@ -76,6 +207,8 @@ bool Blender::BlitToHDC(HDC hdc, int x, int y,
 
     void* dibBits = nullptr;
     HDC memDC = CreateCompatibleDC(hdc);
+    if (!memDC) return false;
+
     HBITMAP hBitmap = CreateDIBSection(memDC, &bmi, DIB_RGB_COLORS, &dibBits, nullptr, 0);
     if (!hBitmap || !dibBits) {
         DeleteDC(memDC);
@@ -83,102 +216,144 @@ bool Blender::BlitToHDC(HDC hdc, int x, int y,
     }
 
     HGDIOBJ oldBitmap = SelectObject(memDC, hBitmap);
+    if (!oldBitmap) {
+        DeleteObject(hBitmap);
+        DeleteDC(memDC);
+        return false;
+    }
 
     BitBlt(memDC, 0, 0, bitmap.width, bitmap.height, hdc, x, y, SRCCOPY);
 
     uint8_t* dst = static_cast<uint8_t*>(dibBits);
     int dstPitch = bitmap.width * 4;
+    const int width = bitmap.width;
+    const int height = bitmap.height;
+    const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
 
-    for (int row = 0; row < bitmap.height; ++row) {
+    thread_local std::vector<float> outR;
+    thread_local std::vector<float> outG;
+    thread_local std::vector<float> outB;
+    thread_local std::vector<float> textMask;
+    outR.resize(pixelCount);
+    outG.resize(pixelCount);
+    outB.resize(pixelCount);
+    textMask.resize(pixelCount);
+
+    for (int row = 0; row < height; ++row) {
         const uint8_t* src = bitmap.data.data() + row * bitmap.pitch;
         uint8_t* dstRow = dst + row * dstPitch;
 
-        for (int col = 0; col < bitmap.width; ++col) {
+        for (int col = 0; col < width; ++col) {
             const uint8_t* srcPx = src + col * 4;
             uint8_t* dstPx = dstRow + col * 4;
-
-            uint8_t alpha = srcPx[3];
-            if (alpha == 0) continue;
-
-            float covB = sRGBToLinear(srcPx[0]);
-            float covG = sRGBToLinear(srcPx[1]);
-            float covR = sRGBToLinear(srcPx[2]);
-
-            float maxCov = std::max({covR, covG, covB});
-            float avgCov = (covR + covG + covB) / 3.0f;
-            // Weighted luminance estimate reduces color fringing from per-channel coverage.
-            float yCov = 0.72f * maxCov + 0.28f * avgCov;
-
-            float chromaKeep = 0.24f;
-            if (tinyText) {
-                chromaKeep = 0.0f;
-            } else if (smallText) {
-                chromaKeep = qdPanel ? 0.05f : 0.08f;
-            } else if (bitmap.height <= 32) {
-                chromaKeep = qdPanel ? 0.10f : 0.14f;
-            } else {
-                chromaKeep = qdPanel ? 0.18f : 0.24f;
-            }
-            if (grayscaleText) {
-                chromaKeep = std::min(chromaKeep, 0.03f);
-            }
-
-            covR = yCov + (covR - yCov) * chromaKeep;
-            covG = yCov + (covG - yCov) * chromaKeep;
-            covB = yCov + (covB - yCov) * chromaKeep;
-
-            auto readabilityTone = [&](float c) -> float {
-                c = std::clamp(c, 0.0f, 1.0f);
-                float expBase = qdPanel ? 1.01f : 1.03f;
-                float expSize = qdPanel ? 0.10f : 0.16f;
-                float gainBase = qdPanel ? 1.000f : 1.004f;
-                float gainSize = qdPanel ? 0.008f : 0.012f;
-                c = 1.0f - std::pow(1.0f - c, expBase + expSize * sizeBoost);
-                if (c > 0.20f) {
-                    c = std::min(1.0f, c * (gainBase + gainSize * sizeBoost));
-                }
-                return std::clamp(c, 0.0f, 1.0f);
-            };
-            covR = readabilityTone(covR);
-            covG = readabilityTone(covG);
-            covB = readabilityTone(covB);
-
-            if (nearBlackText) {
-                float stemBoost =
-                    std::clamp((20.0f - static_cast<float>(bitmap.height)) / 20.0f, 0.0f, 1.0f);
-                float solid = (qdPanel ? 0.94f : 0.96f) * std::max({covR, covG, covB}) +
-                              (qdPanel ? 0.06f : 0.04f) * ((covR + covG + covB) / 3.0f);
-
-                float darkExp = (tinyText ? (qdPanel ? 1.58f : 1.70f)
-                                          : (qdPanel ? 1.38f : 1.50f)) +
-                                (qdPanel ? 0.30f : 0.40f) * stemBoost;
-                solid = 1.0f - std::pow(1.0f - std::clamp(solid, 0.0f, 1.0f), darkExp);
-                if (solid > 0.30f) {
-                    float slope = tinyText ? (qdPanel ? 1.10f : 1.14f)
-                                           : (qdPanel ? 1.06f : 1.08f);
-                    float lift = tinyText ? 0.015f : 0.008f;
-                    solid = std::min(1.0f, solid * slope + lift);
-                }
-                if (tinyText) {
-                    solid = std::max(solid, std::min(1.0f, yCov * 1.18f));
-                }
-
-                covR = solid;
-                covG = solid;
-                covB = solid;
-            }
+            const size_t idx = static_cast<size_t>(row) * static_cast<size_t>(width) +
+                               static_cast<size_t>(col);
 
             float bgLinB = sRGBToLinear(dstPx[0]);
             float bgLinG = sRGBToLinear(dstPx[1]);
             float bgLinR = sRGBToLinear(dstPx[2]);
+            float finalB = bgLinB;
+            float finalG = bgLinG;
+            float finalR = bgLinR;
+            float localMask = 0.0f;
 
-            float finalB = bgLinB * (1.0f - covB) + linTextB * covB;
-            float finalG = bgLinG * (1.0f - covG) + linTextG * covG;
-            float finalR = bgLinR * (1.0f - covR) + linTextR * covR;
+            uint8_t alpha = srcPx[3];
+            if (alpha != 0) {
+                float covB = sRGBToLinear(srcPx[0]);
+                float covG = sRGBToLinear(srcPx[1]);
+                float covR = sRGBToLinear(srcPx[2]);
 
-            dstPx[0] = linearToSRGB(finalB);
-            dstPx[1] = linearToSRGB(finalG);
-            dstPx[2] = linearToSRGB(finalR);
+                float maxCov = std::max({covR, covG, covB});
+                float avgCov = (covR + covG + covB) / 3.0f;
+                // Weighted luminance estimate reduces color fringing from per-channel coverage.
+                float yCov = 0.72f * maxCov + 0.28f * avgCov;
+
+                float chromaKeep = 0.24f;
+                if (tinyText) {
+                    //  Preserve subpixel structure for tiny text
+                    chromaKeep = qdPanel ? 0.30f : 0.35f;
+                } else if (smallText) {
+                    chromaKeep = qdPanel ? 0.35f : 0.40f;
+                } else if (bitmap.height <= 32) {
+                    chromaKeep = qdPanel ? 0.45f : 0.50f;
+                } else {
+                    chromaKeep = qdPanel ? 0.18f : 0.24f;
+                }
+                //  Do not crush chromaKeep for grayscale text on OLED architectures
+                // if (grayscaleText) {
+                //     chromaKeep = std::min(chromaKeep, 0.03f);
+                // }
+
+                covR = yCov + (covR - yCov) * chromaKeep;
+                covG = yCov + (covG - yCov) * chromaKeep;
+                covB = yCov + (covB - yCov) * chromaKeep;
+
+                auto readabilityTone = [&](float c) -> float {
+                    c = std::clamp(c, 0.0f, 1.0f);
+                    float expBase = qdPanel ? 1.01f : 1.03f;
+                    float expSize = qdPanel ? 0.10f : 0.16f;
+                    float gainBase = qdPanel ? 1.000f : 1.004f;
+                    float gainSize = qdPanel ? 0.008f : 0.012f;
+                    c = 1.0f - std::pow(1.0f - c, expBase + expSize * sizeBoost);
+                    if (c > 0.20f) {
+                        c = std::min(1.0f, c * (gainBase + gainSize * sizeBoost));
+                    }
+                    return std::clamp(c, 0.0f, 1.0f);
+                };
+                covR = readabilityTone(covR);
+                covG = readabilityTone(covG);
+                covB = readabilityTone(covB);
+
+                if (nearBlackText) {
+                    float stemBoost =
+                        std::clamp((20.0f - static_cast<float>(bitmap.height)) / 20.0f, 0.0f, 1.0f);
+                    float solid = (qdPanel ? 0.94f : 0.96f) * std::max({covR, covG, covB}) +
+                                  (qdPanel ? 0.06f : 0.04f) * ((covR + covG + covB) / 3.0f);
+
+                    float darkExp = (tinyText ? (qdPanel ? 1.58f : 1.70f)
+                                              : (qdPanel ? 1.38f : 1.50f)) +
+                                    (qdPanel ? 0.30f : 0.40f) * stemBoost;
+                    solid = 1.0f - std::pow(1.0f - std::clamp(solid, 0.0f, 1.0f), darkExp);
+                    if (solid > 0.30f) {
+                        float slope = tinyText ? (qdPanel ? 1.10f : 1.14f)
+                                               : (qdPanel ? 1.06f : 1.08f);
+                        float lift = tinyText ? 0.015f : 0.008f;
+                        solid = std::min(1.0f, solid * slope + lift);
+                    }
+                    if (tinyText) {
+                        solid = std::max(solid, std::min(1.0f, yCov * 1.18f));
+                    }
+
+                    covR = solid;
+                    covG = solid;
+                    covB = solid;
+                }
+
+                localMask = std::max({covR, covG, covB});
+                finalB = bgLinB * (1.0f - covB) + linTextB * covB;
+                finalG = bgLinG * (1.0f - covG) + linTextG * covG;
+                finalR = bgLinR * (1.0f - covR) + linTextR * covR;
+            }
+
+            outB[idx] = finalB;
+            outG[idx] = finalG;
+            outR[idx] = finalR;
+            textMask[idx] = Clamp01(localMask);
+        }
+    }
+
+    ApplyLumaContrastSharpenLinear(outR, outG, outB, textMask, width, height,
+                                   cfg.lumaContrastStrength, false);
+
+    for (int row = 0; row < height; ++row) {
+        uint8_t* dstRow = dst + row * dstPitch;
+        for (int col = 0; col < width; ++col) {
+            uint8_t* dstPx = dstRow + col * 4;
+            const size_t idx = static_cast<size_t>(row) * static_cast<size_t>(width) +
+                               static_cast<size_t>(col);
+            dstPx[0] = linearToSRGB(outB[idx]);
+            dstPx[1] = linearToSRGB(outG[idx]);
+            dstPx[2] = linearToSRGB(outR[idx]);
         }
     }
 
@@ -210,7 +385,7 @@ bool Blender::BlitToD2DTarget(ID2D1RenderTarget* pRT, float x, float y,
     const auto& cfg = Config::Instance().Data();
     const bool qdPanel = (cfg.panelType == PanelType::QD_OLED_TRIANGLE);
     const bool nearBlackText = (std::max({textR8, textG8, textB8}) <= 96);
-    const bool grayscaleText = (textR8 == textG8 && textG8 == textB8);
+    //const bool grayscaleText = (textR8 == textG8 && textG8 == textB8);
     const bool tinyText = (bitmap.height <= 18);
     const bool smallText = (bitmap.height <= 24);
     const float sizeBoost =
@@ -222,12 +397,25 @@ bool Blender::BlitToD2DTarget(ID2D1RenderTarget* pRT, float x, float y,
         linB = 0.0f;
     }
 
-    std::vector<uint8_t> colorized(bitmap.data.size());
-    for (int row = 0; row < bitmap.height; ++row) {
-        for (int col = 0; col < bitmap.width; ++col) {
+    const int width = bitmap.width;
+    const int height = bitmap.height;
+    const size_t pixelCount = static_cast<size_t>(width) * static_cast<size_t>(height);
+
+    thread_local std::vector<float> outR;
+    thread_local std::vector<float> outG;
+    thread_local std::vector<float> outB;
+    thread_local std::vector<float> alphaMask;
+    outR.resize(pixelCount);
+    outG.resize(pixelCount);
+    outB.resize(pixelCount);
+    alphaMask.resize(pixelCount);
+
+    for (int row = 0; row < height; ++row) {
+        for (int col = 0; col < width; ++col) {
             int offset = row * bitmap.pitch + col * 4;
             const uint8_t* src = bitmap.data.data() + offset;
-            uint8_t* dst = colorized.data() + offset;
+            const size_t idx = static_cast<size_t>(row) * static_cast<size_t>(width) +
+                               static_cast<size_t>(col);
 
             float covB = sRGBToLinear(src[0]);
             float covG = sRGBToLinear(src[1]);
@@ -239,17 +427,19 @@ bool Blender::BlitToD2DTarget(ID2D1RenderTarget* pRT, float x, float y,
 
             float chromaKeep = 0.24f;
             if (tinyText) {
-                chromaKeep = 0.0f;
+                //  Preserve subpixel structure for tiny text
+                chromaKeep = qdPanel ? 0.30f : 0.35f;
             } else if (smallText) {
-                chromaKeep = qdPanel ? 0.05f : 0.08f;
+                chromaKeep = qdPanel ? 0.35f : 0.40f;
             } else if (bitmap.height <= 32) {
-                chromaKeep = qdPanel ? 0.10f : 0.14f;
+                chromaKeep = qdPanel ? 0.45f : 0.50f;
             } else {
                 chromaKeep = qdPanel ? 0.18f : 0.24f;
             }
-            if (grayscaleText) {
-                chromaKeep = std::min(chromaKeep, 0.03f);
-            }
+            //  Do not crush chromaKeep for grayscale text on OLED architectures
+            // if (grayscaleText) {
+            //     chromaKeep = std::min(chromaKeep, 0.03f);
+            // }
 
             covR = yCov + (covR - yCov) * chromaKeep;
             covG = yCov + (covG - yCov) * chromaKeep;
@@ -297,20 +487,33 @@ bool Blender::BlitToD2DTarget(ID2D1RenderTarget* pRT, float x, float y,
             }
 
             float alphaCov = std::max({covR, covG, covB});
-            if (alphaCov <= 0.0f) {
-                dst[0] = dst[1] = dst[2] = 0;
-                dst[3] = 0;
+            outR[idx] = covR * linR;
+            outG[idx] = covG * linG;
+            outB[idx] = covB * linB;
+            alphaMask[idx] = Clamp01(alphaCov);
+        }
+    }
+
+    ApplyLumaContrastSharpenLinear(outR, outG, outB, alphaMask, width, height,
+                                   cfg.lumaContrastStrength, true);
+
+    std::vector<uint8_t> colorized(bitmap.data.size());
+    for (int row = 0; row < height; ++row) {
+        for (int col = 0; col < width; ++col) {
+            const size_t idx = static_cast<size_t>(row) * static_cast<size_t>(width) +
+                               static_cast<size_t>(col);
+            const int offset = row * bitmap.pitch + col * 4;
+            uint8_t* dstPx = colorized.data() + offset;
+            const float a = alphaMask[idx];
+            if (a <= 0.0f) {
+                dstPx[0] = dstPx[1] = dstPx[2] = dstPx[3] = 0;
                 continue;
             }
 
-            float finalR = covR * linR;
-            float finalG = covG * linG;
-            float finalB = covB * linB;
-
-            dst[0] = linearToSRGB(finalB);
-            dst[1] = linearToSRGB(finalG);
-            dst[2] = linearToSRGB(finalR);
-            dst[3] = static_cast<uint8_t>(std::clamp(alphaCov, 0.0f, 1.0f) * 255.0f + 0.5f);
+            dstPx[0] = linearToSRGB(outB[idx]);
+            dstPx[1] = linearToSRGB(outG[idx]);
+            dstPx[2] = linearToSRGB(outR[idx]);
+            dstPx[3] = static_cast<uint8_t>(a * 255.0f + 0.5f);
         }
     }
 

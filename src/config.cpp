@@ -1,5 +1,3 @@
-
-
 #include "config.h"
 #include <fstream>
 #include <sstream>
@@ -74,6 +72,8 @@ bool Config::LoadFromFile(const std::string& iniPath) {
     std::string panelStr = ToLower(GetValue("general", "paneltype", "wrgb"));
     if (panelStr == "qd_oled_triangle" || panelStr == "qdoled" || panelStr == "triangular") {
         m_data.panelType = PanelType::QD_OLED_TRIANGLE;
+    } else if (panelStr == "rwbg") {
+        m_data.panelType = PanelType::RWBG;
     } else {
         m_data.panelType = PanelType::WRGB;
     }
@@ -83,6 +83,31 @@ bool Config::LoadFromFile(const std::string& iniPath) {
 
     try { m_data.gamma = std::stof(GetValue("general", "gamma", "1.0")); }
     catch (...) { m_data.gamma = 1.0f; }
+
+    std::string hintingStr = ToLower(GetValue("general", "enablesubpixelhinting", "true"));
+    m_data.enableSubpixelHinting =
+        (hintingStr == "true" || hintingStr == "1" || hintingStr == "yes");
+
+    std::string fracPosStr = ToLower(GetValue("general", "enablefractionalpositioning", "true"));
+    m_data.enableFractionalPositioning =
+        (fracPosStr == "true" || fracPosStr == "1" || fracPosStr == "yes");
+
+    try { m_data.lodThresholdSmall = std::stof(GetValue("general", "lodthresholdsmall", "12.0")); }
+    catch (...) { m_data.lodThresholdSmall = 12.0f; }
+
+    try { m_data.lodThresholdLarge = std::stof(GetValue("general", "lodthresholdlarge", "24.0")); }
+    catch (...) { m_data.lodThresholdLarge = 24.0f; }
+
+    m_data.lodThresholdSmall = std::clamp(m_data.lodThresholdSmall, 6.0f, 96.0f);
+    m_data.lodThresholdLarge = std::clamp(m_data.lodThresholdLarge, m_data.lodThresholdSmall + 1.0f, 160.0f);
+
+    try { m_data.woledCrossTalkReduction = std::stof(GetValue("general", "woledcrosstalkreduction", "0.08")); }
+    catch (...) { m_data.woledCrossTalkReduction = 0.08f; }
+    m_data.woledCrossTalkReduction = std::clamp(m_data.woledCrossTalkReduction, 0.0f, 1.0f);
+
+    try { m_data.lumaContrastStrength = std::stof(GetValue("general", "lumacontraststrength", "1.0")); }
+    catch (...) { m_data.lumaContrastStrength = 1.0f; }
+    m_data.lumaContrastStrength = std::clamp(m_data.lumaContrastStrength, 1.0f, 3.0f);
 
     std::string stemStr = ToLower(GetValue("general", "stemdarkeningenabled", "true"));
     m_data.stemDarkeningEnabled = (stemStr == "true" || stemStr == "1" || stemStr == "yes");

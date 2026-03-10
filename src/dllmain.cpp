@@ -176,6 +176,17 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
                 puretype::Config::Instance().Data().filterStrength);
             PureTypeLog("Gamma: %.2f",
                 puretype::Config::Instance().Data().gamma);
+            PureTypeLog("Subpixel hinting: %s",
+                puretype::Config::Instance().Data().enableSubpixelHinting ? "ON" : "OFF");
+            PureTypeLog("Fractional positioning: %s",
+                puretype::Config::Instance().Data().enableFractionalPositioning ? "ON" : "OFF");
+            PureTypeLog("LOD thresholds: small %.2f / large %.2f",
+                puretype::Config::Instance().Data().lodThresholdSmall,
+                puretype::Config::Instance().Data().lodThresholdLarge);
+            PureTypeLog("WOLED cross-talk reduction: %.3f",
+                puretype::Config::Instance().Data().woledCrossTalkReduction);
+            PureTypeLog("Luma contrast strength: %.2f",
+                puretype::Config::Instance().Data().lumaContrastStrength);
             PureTypeLog("Stem darkening: %s (strength %.2f)",
                 puretype::Config::Instance().Data().stemDarkeningEnabled ? "ON" : "OFF",
                 puretype::Config::Instance().Data().stemDarkeningStrength);
