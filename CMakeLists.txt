@@ -28,11 +28,12 @@ FetchContent_MakeAvailable(freetype)
 add_library(PureType SHARED
     src/dllmain.cpp
     src/config.cpp
-    src/hooks/dwrite_hooks.cpp
-    src/hooks/gdi_hooks.cpp
     src/rasterizer/ft_rasterizer.cpp
     src/filters/subpixel_filter.cpp
+    src/filters/tone_mapper.cpp
     src/output/blender.cpp
+    src/hooks/dwrite_hooks.cpp
+    src/hooks/gdi_hooks.cpp
 )
 
 target_include_directories(PureType PRIVATE
@@ -60,20 +61,21 @@ target_compile_definitions(PureType PRIVATE
 
 target_compile_options(PureType PRIVATE /W4 /WX-)
 
-# ── Injector (System Tray Application with Icon) ─────────────────────────────
-add_executable(Injector WIN32
+# ── Main Executable (System Tray Application with Icon) ──────────────────────
+add_executable(puretype_exe WIN32
     tools/injector.cpp
     src/puretype.rc
 )
+set_target_properties(puretype_exe PROPERTIES OUTPUT_NAME "puretype")
 
-target_compile_definitions(Injector PRIVATE
+target_compile_definitions(puretype_exe PRIVATE
     UNICODE
     _UNICODE
     WIN32_LEAN_AND_MEAN
     NOMINMAX
 )
 
-target_link_libraries(Injector PRIVATE
+target_link_libraries(puretype_exe PRIVATE
     user32.lib
     shell32.lib
     advapi32.lib

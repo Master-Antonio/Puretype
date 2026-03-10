@@ -111,7 +111,6 @@ ID2D1RenderTarget* TryGetD2DRenderTarget(void* clientDrawingContext) {
     if (!IsReadablePointer(*reinterpret_cast<void**>(clientDrawingContext))) return nullptr;
     auto** vtable = *reinterpret_cast<void***>(clientDrawingContext);
     if (!vtable || !vtable[0]) return nullptr;
-    // Only treat context as render target when its vtable resolves into d2d1.dll.
     if (!IsFromD2DModule(vtable[0])) return nullptr;
 
     return reinterpret_cast<ID2D1RenderTarget*>(clientDrawingContext);

@@ -21,7 +21,7 @@ struct ConfigData {
     float       lodThresholdSmall      = 12.0f;
     float       lodThresholdLarge      = 24.0f;
     float       woledCrossTalkReduction = 0.0f;
-    float       lumaContrastStrength   = 1.25f;
+    float       lumaContrastStrength   = 2.0f;
 
     bool        stemDarkeningEnabled   = true;
     float       stemDarkeningStrength  = 0.35f;

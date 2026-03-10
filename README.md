@@ -18,9 +18,20 @@ PureType fixes this by intercepting GDI and DirectWrite calls and re-rendering t
 
 ## Supported panels
 
-**LG WRGB WOLED** — Horizontal 1×5 FIR filter with per-channel HVS weighting. Green gets the widest spatial spread (the eye resolves luminance detail via green). The White subpixel is used for adaptive luminance boost in flat regions while being suppressed at edges to preserve sharpness.
+**LG WOLED (RWBG / RGWB)** — Handles the non-standard subpixel ordering and the addition of the White subpixel. Uses a 1x7 FIR filter in linear space. The algorithm applies "TCON Inversion Math": it injects the calculated white energy into the RGB channels using a mathematical maximum before transmission, allowing the monitor's internal hardware to correctly extract the White subpixel without energy clipping or color fringing.
 
-**Samsung QD-OLED** — 2D 3×3 kernel accounting for the triangular subpixel layout where Green is physically offset ~0.33px vertically from the Red/Blue row. Bilinear interpolation compensates for the offset. Red and Blue are kept tight to minimize color fringing on the triangle grid.
+**Samsung QD-OLED (Triangle/Diamond)** — Addresses the severe color fringing caused by the delta-grid arrangement of QD-OLEDs. It applies specific fractional phase-shifting directly at the FreeType rasterization level, followed by a 1x5 FIR filter. It heavily utilizes the Perceptual Tone Mapper to apply Chroma Crushing (desaturating color artifacts on text edges) and an aggressive S-Curve Readability Tone to counter the "washed-out" effect caused by the large black gaps (fill-factor) in the QD-OLED matrix.
+
+## How it works (The Pipeline)
+
+1. **Injection:** `puretype.exe` forces Windows to load `PureType.dll` into target processes via `SetWindowsHookEx(WH_CBT)`.
+2. **Hooking:** MinHook intercepts `ExtTextOutW` (GDI) and `IDWriteTextLayout::Draw` (DirectWrite), checking against a rigorous blacklist to avoid crashing sandboxed apps.
+3. **Phase-Aware Rasterization:** FreeType renders the glyphs at 3× horizontal resolution. The rasterizer dynamically shifts the vector outlines (phase) based on the physical pixel grid of the target OLED panel.
+4. **Subpixel Filtering:** FIR low-pass filters distribute the geometric coverage in strictly linear light, calculating exact light emission values for each subpixel.
+5. **Perceptual Tone Mapping:**
+    * *Chroma Crushing:* Detects subpixel imbalances on high-contrast edges and pushes them towards neutral grays, eliminating the purple/green OLED fringing.
+    * *Readability Tone:* Applies a dynamic power exponent to inflate the text stems based on font size and the `LumaContrastStrength` setting.
+6. **Compositing:** The final RGBA buffer is alpha-blended over the application's background using mathematically correct linear-space compositing via D2D or GDI `BitBlt`.
 
 ## Building
 
@@ -32,13 +43,13 @@ cmake --build build --config Release
 ```
 
 Output lands in `build/Release/`:
-- `Injector.exe` — system tray loader
+- `puretype.exe` — system tray loader
 - `PureType.dll` — the rendering engine
 - `puretype.ini` — configuration
 
 ## Usage
 
-Put all three files in the same folder. Run `Injector.exe` — ideally as Administrator for full system-wide coverage. A tray icon appears.
+Put all three files in the same folder. Run `puretype.exe` — ideally as Administrator for full system-wide coverage. A tray icon appears.
 
 Right-click the tray icon to:
 - **Enable / Disable** the hook (toggle injection on/off)
@@ -107,7 +118,7 @@ StemDarkeningStrength=0.45
 
 ## How it works (briefly)
 
-1. `Injector.exe` calls `SetWindowsHookEx(WH_CBT)` pointing at an exported callback in `PureType.dll`
+1. `puretype.exe` calls `SetWindowsHookEx(WH_CBT)` pointing at an exported callback in `PureType.dll`
 2. Windows automatically loads `PureType.dll` into every process that creates a window
 3. On load, the DLL checks the host process against a blacklist — if matched, it bails immediately
 4. Otherwise it initializes FreeType, installs MinHook detours on GDI/DirectWrite text functions

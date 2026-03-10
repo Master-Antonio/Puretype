@@ -194,6 +194,7 @@ static std::vector<uint16_t> TextToGlyphIndices(HDC hdc, LPCWSTR text, UINT coun
     std::vector<uint16_t> indices(count);
 
     if (isGlyphIndex) {
+        // If the caller provided glyph indices directly, skip character mapping.
 
         for (UINT i = 0; i < count; ++i) {
             indices[i] = static_cast<uint16_t>(text[i]);
@@ -356,7 +357,7 @@ static BOOL WINAPI Hooked_ExtTextOutW(
     if ((align & TA_BOTTOM) == TA_BOTTOM) {
         startY -= tm.tmDescent;
     } else if (((align & TA_BASELINE) != TA_BASELINE) && ((align & TA_BOTTOM) != TA_BOTTOM)) {
-
+        // Default top-alignment adjustment.
         startY += tm.tmAscent;
     }
 
@@ -365,7 +366,7 @@ static BOOL WINAPI Hooked_ExtTextOutW(
         FillRect(hdc, lprc, hBrush);
         DeleteObject(hBrush);
     } else if (GetBkMode(hdc) == OPAQUE) {
-
+        // Handle opaque background for non-clipped regions.
         RECT bgRect;
         bgRect.left = startX;
         bgRect.top = startY - tm.tmAscent;

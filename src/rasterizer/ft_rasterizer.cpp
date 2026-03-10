@@ -147,40 +147,76 @@ const GlyphBitmap* FTRasterizer::RasterizeGlyph(
         cfg.enableSubpixelHinting
     };
     
+    // 1. Thread-safe cache check (non-blocking for FreeType)
     if (const GlyphBitmap* cached = m_cache.TryGet(key)) return cached;
 
-    std::lock_guard<std::mutex> lock(m_mutex);
-    if (!m_ftLibrary) return nullptr;
-    FT_Face face = GetOrLoadFace(fontPath);
-    if (!face) return nullptr;
+    // Temporary storage for extracted metrics and data
+    int bmpWidth = 0;
+    int bmpHeight = 0;
+    int bmpPitch = 0;
+    int bearingX = 0;
+    int bearingY = 0;
+    int advanceX = 0;
+    std::vector<uint8_t> rawData;
 
-    FT_Set_Pixel_Sizes(face, 0, pixelSize);
+    {
+        // 2. CRITICAL SECTION: Minimize holding the FreeType library mutex.
+        // We only block while calling the FT_ API itself.
+        std::lock_guard<std::mutex> lock(m_mutex);
+        if (!m_ftLibrary) return nullptr;
+        FT_Face face = GetOrLoadFace(fontPath);
+        if (!face) return nullptr;
 
-    FT_Int32 loadFlags = FT_LOAD_DEFAULT | FT_LOAD_TARGET_LCD;
-    if (cfg.enableSubpixelHinting) {
-        loadFlags |= FT_LOAD_FORCE_AUTOHINT;
+        FT_Set_Pixel_Sizes(face, 0, pixelSize);
+
+        FT_Int32 loadFlags = FT_LOAD_DEFAULT | FT_LOAD_TARGET_LCD;
+        if (cfg.enableSubpixelHinting) {
+            loadFlags |= FT_LOAD_FORCE_AUTOHINT;
+        }
+
+        FT_Pos oledPhaseX = (cfg.panelType == PanelType::QD_OLED_TRIANGLE) ? 32 : 24;
+        FT_Pos oledPhaseY = (cfg.panelType == PanelType::QD_OLED_TRIANGLE) ? 21 : 0;
+
+        FT_Vector phaseVec;
+        phaseVec.x = (phaseX * 16) + oledPhaseX; 
+        phaseVec.y = (phaseY * 16) + oledPhaseY;
+
+        FT_Set_Transform(face, nullptr, &phaseVec);
+
+        FT_Error error = FT_Load_Glyph(face, glyphIndex, loadFlags);
+        if (error) return nullptr;
+
+        error = FT_Render_Glyph(face->glyph, FT_RENDER_MODE_LCD);
+        if (error) return nullptr;
+
+        FT_Bitmap& ftBmp = face->glyph->bitmap;
+        bmpWidth = static_cast<int>(ftBmp.width);
+        bmpHeight = static_cast<int>(ftBmp.rows);
+        bmpPitch = ftBmp.pitch;
+        bearingX = face->glyph->bitmap_left * 3;
+        bearingY = face->glyph->bitmap_top;
+        advanceX = static_cast<int>(face->glyph->advance.x >> 6) * 3;
+
+        // Extract raw buffer safely while holding the lock.
+        int dataSize = bmpHeight * std::abs(bmpPitch);
+        if (dataSize > 0 && ftBmp.buffer) {
+            rawData.resize(dataSize);
+            if (ftBmp.pitch > 0) {
+                std::memcpy(rawData.data(), ftBmp.buffer, dataSize);
+            } else {
+                int absPitch = std::abs(ftBmp.pitch);
+                for (int row = 0; row < bmpHeight; ++row) {
+                    const uint8_t* src = ftBmp.buffer + (bmpHeight - 1 - row) * absPitch;
+                    std::memcpy(rawData.data() + row * absPitch, src, absPitch);
+                }
+                bmpPitch = absPitch;
+            }
+        }
     }
 
-    // Both RGWB and RWBG share the exact same physical luminance structure (White core).
-    FT_Pos oledPhaseX = (cfg.panelType == PanelType::QD_OLED_TRIANGLE) ? 32 : 24;
-    FT_Pos oledPhaseY = (cfg.panelType == PanelType::QD_OLED_TRIANGLE) ? 21 : 0;
+    if (rawData.empty() && bmpWidth > 0 && bmpHeight > 0) return nullptr;
 
-    FT_Vector phaseVec;
-    phaseVec.x = (phaseX * 16) + oledPhaseX; 
-    phaseVec.y = (phaseY * 16) + oledPhaseY;
-
-    // 2. Diciamo a FreeType esattamente dove si trova la griglia fisica OLED
-    FT_Set_Transform(face, nullptr, &phaseVec);
-
-    // 3. Ora FreeType carica e fa l'hinting tenendo conto della posizione esatta!
-    FT_Error error = FT_Load_Glyph(face, glyphIndex, loadFlags);
-    if (error) return nullptr;
-
-    // 4. Renderizziamo sempre a risoluzione 3x (LCD) per estrarre i dati cromatici
-    error = FT_Render_Glyph(face->glyph, FT_RENDER_MODE_LCD);
-    if (error) return nullptr;
-
-    FT_Bitmap& ftBmp = face->glyph->bitmap;
+    // 3. Create and cache the bitmap object outside of the bottleneck.
     GlyphBitmap bmp;
     bmp.fontHash = std::hash<std::string>{}(fontPath);
     bmp.glyphIndex = glyphIndex;
@@ -188,26 +224,13 @@ const GlyphBitmap* FTRasterizer::RasterizeGlyph(
     bmp.fontWeight = fontWeight;
     bmp.phaseX = static_cast<uint8_t>(phaseX & 0x03u);
     bmp.phaseY = static_cast<uint8_t>(phaseY & 0x03u);
-    bmp.width    = static_cast<int>(ftBmp.width);
-    bmp.height   = static_cast<int>(ftBmp.rows);
-    bmp.pitch    = ftBmp.pitch;
-    bmp.bearingX = face->glyph->bitmap_left * 3;
-    bmp.bearingY = face->glyph->bitmap_top;
-    bmp.advanceX = static_cast<int>(face->glyph->advance.x >> 6) * 3;
-
-    int dataSize = bmp.height * std::abs(bmp.pitch);
-    bmp.data.resize(dataSize);
-    
-    if (ftBmp.pitch > 0) {
-        std::memcpy(bmp.data.data(), ftBmp.buffer, dataSize);
-    } else {
-        int absPitch = std::abs(ftBmp.pitch);
-        for (int row = 0; row < bmp.height; ++row) {
-            const uint8_t* src = ftBmp.buffer + (bmp.height - 1 - row) * absPitch;
-            std::memcpy(bmp.data.data() + row * absPitch, src, absPitch);
-        }
-        bmp.pitch = absPitch;
-    }
+    bmp.width = bmpWidth;
+    bmp.height = bmpHeight;
+    bmp.pitch = std::abs(bmpPitch);
+    bmp.bearingX = bearingX;
+    bmp.bearingY = bearingY;
+    bmp.advanceX = advanceX;
+    bmp.data = std::move(rawData);
 
     return m_cache.Put(key, std::move(bmp), fontPath.size());
 }

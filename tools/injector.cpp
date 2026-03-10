@@ -210,7 +210,7 @@ static bool EnableHook() {
 
     if (GetFileAttributesW(dllPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
         MessageBoxW(nullptr,
-            L"PureType.dll not found next to Injector.exe.",
+            L"PureType.dll not found next to puretype.exe.",
             L"PureType Error", MB_OK | MB_ICONERROR);
         return false;
     }
@@ -405,7 +405,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int) {
     g_hInstance = hInstance;
 
-    HANDLE hMutex = CreateMutexW(nullptr, TRUE, L"PureType_Injector_Mutex");
+    HANDLE hMutex = CreateMutexW(nullptr, TRUE, L"PureType_Executable_Mutex");
     if (GetLastError() == ERROR_ALREADY_EXISTS) {
         MessageBoxW(nullptr,
             L"PureType is already running.",
