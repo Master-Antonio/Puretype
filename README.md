@@ -166,3 +166,6 @@ The subpixel filter pipeline:
 ## License
 
 GNU GPLv3 
+
+Support me:
+https://paypal.me/masterantonio
