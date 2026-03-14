@@ -14,9 +14,9 @@ namespace puretype
 
     static std::string Trim(const std::string& s)
     {
-        auto start = s.find_first_not_of(" \t\r\n");
+        const auto start = s.find_first_not_of(" \t\r\n");
         if (start == std::string::npos) return "";
-        auto end = s.find_last_not_of(" \t\r\n");
+        const auto end = s.find_last_not_of(" \t\r\n");
         return s.substr(start, end - start + 1);
     }
 
@@ -24,7 +24,7 @@ namespace puretype
     {
         std::string result = s;
         std::transform(result.begin(), result.end(), result.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+                       [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
         return result;
     }
 
@@ -40,28 +40,26 @@ namespace puretype
             return;
         }
 
-        auto eqPos = trimmed.find('=');
+        const auto eqPos = trimmed.find('=');
         if (eqPos == std::string::npos) return;
 
         std::string key = ToLower(Trim(trimmed.substr(0, eqPos)));
         std::string value = Trim(trimmed.substr(eqPos + 1));
 
-        auto commentPos = value.find(';');
-        if (commentPos != std::string::npos)
+        if (const auto commentPos = value.find(';'); commentPos != std::string::npos)
         {
             value = Trim(value.substr(0, commentPos));
         }
 
-        std::string fullKey = currentSection.empty() ? key : (currentSection + "." + key);
+        const std::string fullKey = currentSection.empty() ? key : (currentSection + "." + key);
         m_values[fullKey] = value;
     }
 
     std::string Config::GetValue(const std::string& section, const std::string& key,
                                  const std::string& defaultVal) const
     {
-        std::string fullKey = ToLower(section) + "." + ToLower(key);
-        auto it = m_values.find(fullKey);
-        if (it != m_values.end()) return it->second;
+        const std::string fullKey = ToLower(section) + "." + ToLower(key);
+        if (const auto it = m_values.find(fullKey); it != m_values.end()) return it->second;
         return defaultVal;
     }
 
@@ -78,8 +76,8 @@ namespace puretype
         }
         file.close();
 
-        std::string panelStr = ToLower(GetValue("general", "paneltype", "rwbg"));
-        if (panelStr == "qd_oled_triangle" || panelStr == "qdoled" || panelStr == "triangular")
+        if (std::string panelStr = ToLower(GetValue("general", "paneltype", "rwbg")); panelStr == "qd_oled_triangle" ||
+            panelStr == "qdoled" || panelStr == "triangular")
         {
             m_data.panelType = PanelType::QD_OLED_TRIANGLE;
         }
@@ -94,9 +92,14 @@ namespace puretype
 
         try { m_data.filterStrength = std::stof(GetValue("general", "filterstrength", "1.0")); }
         catch (...) { m_data.filterStrength = 1.0f; }
+        // Validate filter strength range
+        m_data.filterStrength = std::clamp(m_data.filterStrength, 0.0f, 5.0f);
 
         try { m_data.gamma = std::stof(GetValue("general", "gamma", "1.0")); }
         catch (...) { m_data.gamma = 1.0f; }
+        // Validate gamma range — values outside [0.5, 3.0] produce
+        // extreme over/under-exposure that corrupts visual output
+        m_data.gamma = std::clamp(m_data.gamma, 0.5f, 3.0f);
 
         std::string hintingStr = ToLower(GetValue("general", "enablesubpixelhinting", "true"));
         m_data.enableSubpixelHinting =

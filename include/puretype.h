@@ -1,5 +1,7 @@
 #pragma once
 
+#include <atomic>
+
 #define PURETYPE_VERSION_MAJOR 0
 #define PURETYPE_VERSION_MINOR 1
 #define PURETYPE_VERSION_PATCH 0
@@ -16,4 +18,9 @@ namespace puretype
     class FTRasterizer;
     class SubpixelFilter;
     class Blender;
+
+    // Global hook reference count for safe DLL shutdown.
+    // Hooks increment on entry, decrement on exit.
+    // DLL_PROCESS_DETACH spin-waits until this reaches zero before destroying the rasterizer.
+    extern std::atomic<int> g_activeHookCount;
 }

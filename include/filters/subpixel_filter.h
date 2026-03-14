@@ -11,9 +11,9 @@ namespace puretype
 
     struct RGBABitmap
     {
-        int width;
-        int height;
-        int pitch;
+        int width = 0;
+        int height = 0;
+        int pitch = 0;
         std::vector<uint8_t> data;
     };
 

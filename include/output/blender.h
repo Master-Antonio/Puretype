@@ -22,7 +22,8 @@ namespace puretype
         bool BlitToD2DTarget(ID2D1RenderTarget* pRT, float x, float y,
                              const RGBABitmap& bitmap,
                              const D2D1_COLOR_F& textColor,
-                             float gamma);
+                             float gamma,
+                             float pixelsPerDip = 1.0f);
 
         static Blender& Instance();
 

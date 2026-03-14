@@ -1,14 +1,38 @@
 #include "rasterizer/ft_rasterizer.h"
 #include "config.h"
+#include "puretype.h"
 #include <cstring>
 #include <algorithm>
 #include FT_LCD_FILTER_H
-#include FT_OUTLINE_H
 
 extern void PureTypeLog(const char* fmt, ...);
 
 namespace puretype
 {
+    // Definition of the global hook reference counter (declared in puretype.h).
+    std::atomic<int> g_activeHookCount{0};
+
+    // -------------------------------------------------------------------------
+    // Phase normalization.
+    //
+    // The subpixel grid has EXACTLY 3 subpixels per physical pixel.
+    // Correct phase range is [0, 2] with a step of 64/3 ≈ 21 FT fractional units.
+    //
+    // Using 4 phases (& 0x03) produces steps of 16 FT units → 0, 16, 32, 48.
+    // These do NOT align with subpixel centers (0, 21.3, 42.6), causing every
+    // glyph to be rasterized at a suboptimally-shifted position.
+    //
+    // Using 3 phases (% 3) with step 21 → 0, 21, 42 → aligns exactly to the
+    // three subpixel positions within each physical pixel.
+    // -------------------------------------------------------------------------
+    static constexpr uint8_t kPhaseCount = 3;
+    static constexpr FT_Pos kPhaseStep = 21; // 64 FT units / 3 subpixels ≈ 21
+
+    static uint8_t NormalizePhase(uint8_t raw)
+    {
+        return static_cast<uint8_t>(raw % kPhaseCount);
+    }
+
     FTRasterizer& FTRasterizer::Instance()
     {
         static FTRasterizer instance;
@@ -24,9 +48,8 @@ namespace puretype
 
     const GlyphBitmap* GlyphCache::TryGet(const GlyphCacheKey& key)
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        auto it = m_cacheMap.find(key);
-        if (it != m_cacheMap.end())
+        std::lock_guard lock(m_mutex);
+        if (const auto it = m_cacheMap.find(key); it != m_cacheMap.end())
         {
             m_cacheList.splice(m_cacheList.begin(), m_cacheList, it->second);
             return &it->second->bitmap;
@@ -36,11 +59,10 @@ namespace puretype
 
     const GlyphBitmap* GlyphCache::Put(const GlyphCacheKey& key, GlyphBitmap&& bitmap, size_t extraBytes)
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard lock(m_mutex);
 
-        // Check if another thread inserted it while we were rasterizing
-        auto it = m_cacheMap.find(key);
-        if (it != m_cacheMap.end())
+        // Check if another thread inserted it while we were rasterizing.
+        if (auto it = m_cacheMap.find(key); it != m_cacheMap.end())
         {
             m_cacheList.splice(m_cacheList.begin(), m_cacheList, it->second);
             return &it->second->bitmap;
@@ -61,7 +83,7 @@ namespace puretype
 
     void GlyphCache::Clear()
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard lock(m_mutex);
         m_cacheList.clear();
         m_cacheMap.clear();
         m_cacheBytes = 0;
@@ -70,35 +92,27 @@ namespace puretype
     void GlyphCache::EvictOldest()
     {
         if (m_cacheList.empty()) return;
-        auto& oldest = m_cacheList.back();
-        if (m_cacheBytes >= oldest.bytes)
-        {
-            m_cacheBytes -= oldest.bytes;
-        }
-        else
-        {
-            m_cacheBytes = 0;
-        }
+        const auto& oldest = m_cacheList.back();
+        m_cacheBytes = (m_cacheBytes >= oldest.bytes) ? (m_cacheBytes - oldest.bytes) : 0;
         m_cacheMap.erase(oldest.key);
         m_cacheList.pop_back();
     }
 
     bool FTRasterizer::Initialize()
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard lock(m_mutex);
 
         if (m_ftLibrary) return true;
 
-        FT_Error error = FT_Init_FreeType(&m_ftLibrary);
-        if (error)
+        if (const FT_Error error = FT_Init_FreeType(&m_ftLibrary))
         {
             PureTypeLog("FT_Init_FreeType failed with error %d", error);
             m_ftLibrary = nullptr;
             return false;
         }
 
-        FT_Library_SetLcdFilter(m_ftLibrary, FT_LCD_FILTER_NONE);
         // We apply panel-specific filtering ourselves after rasterization.
+        FT_Library_SetLcdFilter(m_ftLibrary, FT_LCD_FILTER_NONE);
 
         PureTypeLog("FreeType library initialized (version %d.%d.%d)",
                     FREETYPE_MAJOR, FREETYPE_MINOR, FREETYPE_PATCH);
@@ -107,15 +121,16 @@ namespace puretype
 
     void FTRasterizer::Shutdown()
     {
-        std::lock_guard<std::mutex> lock(m_mutex);
+        std::lock_guard lock(m_mutex);
 
         m_cache.Clear();
 
-        for (auto& [path, face] : m_faceCache)
+        for (auto& [path, cached] : m_faceCache)
         {
-            if (face) FT_Done_Face(face);
+            if (cached.face) FT_Done_Face(cached.face);
         }
         m_faceCache.clear();
+        m_faceLRU.clear();
 
         if (m_ftLibrary)
         {
@@ -124,14 +139,39 @@ namespace puretype
         }
     }
 
+    void FTRasterizer::EvictOldestFace()
+    {
+        if (m_faceLRU.empty()) return;
+        const std::string& oldestPath = m_faceLRU.back();
+        if (const auto it = m_faceCache.find(oldestPath); it != m_faceCache.end())
+        {
+            if (it->second.face)
+            {
+                PureTypeLog("Face cache evicting: %s", oldestPath.c_str());
+                FT_Done_Face(it->second.face);
+            }
+            m_faceCache.erase(it);
+        }
+        m_faceLRU.pop_back();
+    }
+
     FT_Face FTRasterizer::GetOrLoadFace(const std::string& fontPath)
     {
-        auto it = m_faceCache.find(fontPath);
-        if (it != m_faceCache.end()) return it->second;
+        if (const auto it = m_faceCache.find(fontPath); it != m_faceCache.end())
+        {
+            // Cache hit — promote to MRU position.
+            m_faceLRU.splice(m_faceLRU.begin(), m_faceLRU, it->second.lruIter);
+            return it->second.face;
+        }
+
+        // Evict LRU face if at capacity.
+        while (m_faceCache.size() >= MAX_FACE_CACHE_ENTRIES)
+        {
+            EvictOldestFace();
+        }
 
         FT_Face face = nullptr;
-        FT_Error error = FT_New_Face(m_ftLibrary, fontPath.c_str(), 0, &face);
-        if (error)
+        if (const FT_Error error = FT_New_Face(m_ftLibrary, fontPath.c_str(), 0, &face))
         {
             PureTypeLog("FT_New_Face failed for '%s' (error %d)", fontPath.c_str(), error);
             return nullptr;
@@ -142,7 +182,12 @@ namespace puretype
                     face->family_name ? face->family_name : "?",
                     face->style_name ? face->style_name : "?");
 
-        m_faceCache[fontPath] = face;
+        m_faceLRU.push_front(fontPath);
+        CachedFace cached;
+        cached.face = face;
+        cached.lruIter = m_faceLRU.begin();
+        m_faceCache[fontPath] = cached;
+
         return face;
     }
 
@@ -155,103 +200,200 @@ namespace puretype
         uint8_t phaseY)
     {
         const auto& cfg = Config::Instance().Data();
+
+        // Normalize phases to [0, kPhaseCount-1] = [0, 2].
+        const uint8_t normPhaseX = NormalizePhase(phaseX);
+        const uint8_t normPhaseY = NormalizePhase(phaseY);
+
         GlyphCacheKey key{
             fontPath, glyphIndex, pixelSize, fontWeight,
-            static_cast<uint8_t>(phaseX & 0x03u),
-            static_cast<uint8_t>(phaseY & 0x03u),
+            normPhaseX,
+            normPhaseY,
             static_cast<uint8_t>(cfg.panelType),
             cfg.enableSubpixelHinting
         };
 
-        // 1. Thread-safe cache check (non-blocking for FreeType)
+        // 1. Thread-safe cache check (non-blocking for FreeType).
         if (const GlyphBitmap* cached = m_cache.TryGet(key)) return cached;
 
-        // Temporary storage for extracted metrics and data
         int bmpWidth = 0;
         int bmpHeight = 0;
         int bmpPitch = 0;
         int bearingX = 0;
         int bearingY = 0;
         int advanceX = 0;
+        int padLeftSubpixels = 0;
+        int padTopPixels = 0;
         std::vector<uint8_t> rawData;
 
         {
-            // 2. CRITICAL SECTION: Minimize holding the FreeType library mutex.
-            // We only block while calling the FT_ API itself.
+            // 2. Hold the FreeType lock only while calling FT_ APIs.
             std::lock_guard<std::mutex> lock(m_mutex);
             if (!m_ftLibrary) return nullptr;
+
             FT_Face face = GetOrLoadFace(fontPath);
             if (!face) return nullptr;
 
             FT_Set_Pixel_Sizes(face, 0, pixelSize);
 
-            FT_Int32 loadFlags = FT_LOAD_DEFAULT | FT_LOAD_TARGET_LCD;
-            if (cfg.enableSubpixelHinting)
+
+            // FT_LOAD_TARGET_LCD optimises stem positions for HORIZONTAL RGB stripe
+            // layout — it biases vertical stem edges toward the nearest horizontal
+            // subpixel boundary. This is correct for RWBG and RGWB panels where
+            // subpixels run in a row left-to-right.
+            //
+            // For QD-OLED (triangular geometry) the subpixels are NOT in a stripe —
+            // they form triangles with a ±0.5 px vertical offset between rows.
+            // FT_LOAD_TARGET_LCD would push stem edges to wrong positions, creating
+            // visible misalignment artifacts on diagonal and thin strokes.
+            //
+            // FT_LOAD_TARGET_NORMAL uses isotropic hinting (equal priority on both
+            // axes), which is the correct baseline for triangular subpixel layouts.
+            // We still render with FT_RENDER_MODE_LCD to obtain the 3× horizontal
+            // oversampled bitmap that our TriangularFilter expects.
+            FT_Int32 loadFlags = FT_LOAD_DEFAULT;
+            if (cfg.panelType == PanelType::QD_OLED_TRIANGLE)
             {
-                loadFlags |= FT_LOAD_FORCE_AUTOHINT;
+                // Isotropic hinting — no horizontal-stripe bias.
+                loadFlags |= FT_LOAD_TARGET_NORMAL;
+            }
+            else
+            {
+                // RWBG / RGWB stripe panels — horizontal hinting is correct.
+                loadFlags |= FT_LOAD_TARGET_LCD;
             }
 
-            FT_Pos oledPhaseX = (cfg.panelType == PanelType::QD_OLED_TRIANGLE) ? 32 : 24;
-            FT_Pos oledPhaseY = (cfg.panelType == PanelType::QD_OLED_TRIANGLE) ? 21 : 0;
+            if (cfg.enableSubpixelHinting)
+                loadFlags |= FT_LOAD_FORCE_AUTOHINT;
+
+            // Panel-type base phase offsets, in FT 26.6 fractional units.
+            // QD-OLED (triangular): 0.5px H + ~0.33px V for triangular subpixel geometry.
+            // Standard RWBG/RGWB:  0.375px H, no V offset.
+            const FT_Pos oledPhaseX = (cfg.panelType == PanelType::QD_OLED_TRIANGLE) ? 32 : 24;
+            const FT_Pos oledPhaseY = (cfg.panelType == PanelType::QD_OLED_TRIANGLE) ? 21 : 0;
 
             FT_Vector phaseVec;
-            phaseVec.x = (phaseX * 16) + oledPhaseX;
-            phaseVec.y = (phaseY * 16) + oledPhaseY;
+            // kPhaseStep = 21 FT units ≈ 64/3 aligns each phase to one subpixel center.
+            // Old code used step=16 (4 phases), which is incoherent with the 3-subpixel grid.
+            phaseVec.x = (normPhaseX * kPhaseStep) + oledPhaseX;
+            phaseVec.y = (normPhaseY * kPhaseStep) + oledPhaseY;
 
             FT_Set_Transform(face, nullptr, &phaseVec);
 
             FT_Error error = FT_Load_Glyph(face, glyphIndex, loadFlags);
             if (error) return nullptr;
 
+            // Always render in LCD mode to get the 3× horizontal oversampling
+            // regardless of the load target / hinting mode chosen above.
             error = FT_Render_Glyph(face->glyph, FT_RENDER_MODE_LCD);
             if (error) return nullptr;
 
             FT_Bitmap& ftBmp = face->glyph->bitmap;
-            bmpWidth = static_cast<int>(ftBmp.width);
-            bmpHeight = static_cast<int>(ftBmp.rows);
-            bmpPitch = ftBmp.pitch;
-            bearingX = face->glyph->bitmap_left * 3;
-            bearingY = face->glyph->bitmap_top;
+
+            if (ftBmp.pixel_mode != FT_PIXEL_MODE_LCD &&
+                ftBmp.pixel_mode != FT_PIXEL_MODE_GRAY)
+            {
+                return nullptr;
+            }
+
+            const bool isGray = (ftBmp.pixel_mode == FT_PIXEL_MODE_GRAY);
+
+            // In LCD mode: ftBmp.width is already in bytes (3 bytes per logical pixel).
+            // In gray mode: expand each sample to 3 identical bytes.
+            const int origWidth = isGray
+                                      ? static_cast<int>(ftBmp.width) * 3
+                                      : static_cast<int>(ftBmp.width);
+            const int origHeight = static_cast<int>(ftBmp.rows);
+            const int origPitch = isGray
+                                      ? static_cast<int>(ftBmp.width) * 3
+                                      : std::abs(ftBmp.pitch);
+
+            // Store the UNMODIFIED FreeType bearing — padding offset tracked separately.
+            bearingX = face->glyph->bitmap_left * 3; // subpixel units
+            bearingY = face->glyph->bitmap_top; // pixels above baseline
             advanceX = static_cast<int>(face->glyph->advance.x >> 6) * 3;
 
-            // Extract raw buffer safely while holding the lock.
-            int dataSize = bmpHeight * std::abs(bmpPitch);
-            if (dataSize > 0 && ftBmp.buffer)
+            // ADD PADDING: 1 physical pixel (3 subpixels) left/right, 1 pixel top/bottom.
+            // This gives the FIR subpixel filter room to spread energy without edge-clipping.
+            padLeftSubpixels = 3;
+            padTopPixels = 1;
+
+            bmpWidth = origWidth + padLeftSubpixels * 2;
+            bmpHeight = origHeight + padTopPixels * 2;
+
+            // 4-byte stride alignment required by GDI DIBs and our blitters.
+            // INVARIANT: bmp.pitch is ALWAYS used as the row stride downstream — never bmp.width.
+            bmpPitch = (bmpWidth + 3) & ~3;
+
+            const int dataSize = bmpHeight * bmpPitch;
+            if (origHeight > 0 && origPitch > 0 && ftBmp.buffer)
             {
-                rawData.resize(dataSize);
-                if (ftBmp.pitch > 0)
+                rawData.assign(dataSize, 0u);
+
+                if (isGray)
                 {
-                    std::memcpy(rawData.data(), ftBmp.buffer, dataSize);
+                    const int srcPitch = std::abs(ftBmp.pitch);
+                    for (int row = 0; row < origHeight; ++row)
+                    {
+                        const uint8_t* srcRow = ftBmp.buffer +
+                            (ftBmp.pitch > 0 ? row : (origHeight - 1 - row)) * srcPitch;
+                        uint8_t* dstRow = rawData.data() +
+                            (row + padTopPixels) * bmpPitch + padLeftSubpixels;
+
+                        for (int col = 0; col < static_cast<int>(ftBmp.width); ++col)
+                        {
+                            const uint8_t val = srcRow[col];
+                            dstRow[col * 3 + 0] = val;
+                            dstRow[col * 3 + 1] = val;
+                            dstRow[col * 3 + 2] = val;
+                        }
+                    }
                 }
                 else
                 {
-                    int absPitch = std::abs(ftBmp.pitch);
-                    for (int row = 0; row < bmpHeight; ++row)
+                    if (ftBmp.pitch > 0)
                     {
-                        const uint8_t* src = ftBmp.buffer + (bmpHeight - 1 - row) * absPitch;
-                        std::memcpy(rawData.data() + row * absPitch, src, absPitch);
+                        for (int row = 0; row < origHeight; ++row)
+                        {
+                            const uint8_t* srcRow = ftBmp.buffer + row * std::abs(ftBmp.pitch);
+                            uint8_t* dstRow = rawData.data() +
+                                (row + padTopPixels) * bmpPitch + padLeftSubpixels;
+                            std::memcpy(dstRow, srcRow, origWidth);
+                        }
                     }
-                    bmpPitch = absPitch;
+                    else
+                    {
+                        const int absPitch = std::abs(ftBmp.pitch);
+                        for (int row = 0; row < origHeight; ++row)
+                        {
+                            const uint8_t* srcRow = ftBmp.buffer + (origHeight - 1 - row) * absPitch;
+                            uint8_t* dstRow = rawData.data() +
+                                (row + padTopPixels) * bmpPitch + padLeftSubpixels;
+                            std::memcpy(dstRow, srcRow, origWidth);
+                        }
+                    }
                 }
             }
-        }
+        } // release m_mutex
 
-        if (rawData.empty() && bmpWidth > 0 && bmpHeight > 0) return nullptr;
+        if (rawData.empty() && (bmpWidth > 0 || bmpHeight > 0)) return nullptr;
 
-        // 3. Create and cache the bitmap object outside of the bottleneck.
+        // 3. Build and cache the bitmap outside the FreeType bottleneck.
         GlyphBitmap bmp;
         bmp.fontHash = std::hash<std::string>{}(fontPath);
         bmp.glyphIndex = glyphIndex;
         bmp.pixelSize = pixelSize;
         bmp.fontWeight = fontWeight;
-        bmp.phaseX = static_cast<uint8_t>(phaseX & 0x03u);
-        bmp.phaseY = static_cast<uint8_t>(phaseY & 0x03u);
+        bmp.phaseX = normPhaseX;
+        bmp.phaseY = normPhaseY;
         bmp.width = bmpWidth;
         bmp.height = bmpHeight;
-        bmp.pitch = std::abs(bmpPitch);
-        bmp.bearingX = bearingX;
-        bmp.bearingY = bearingY;
+        bmp.pitch = bmpPitch; // ALWAYS use as row stride, never bmp.width
+        bmp.bearingX = bearingX; // Unmodified FreeType bearing in subpixel units
+        bmp.bearingY = bearingY; // Unmodified FreeType bearing in pixels
         bmp.advanceX = advanceX;
+        bmp.padLeft = padLeftSubpixels; // Padding subpixels on the left (for positioning)
+        bmp.padTop = padTopPixels; // Padding pixels on the top   (for positioning)
         bmp.data = std::move(rawData);
 
         return m_cache.Put(key, std::move(bmp), fontPath.size());
@@ -274,21 +416,28 @@ namespace puretype
 
         for (uint32_t i = 0; i < glyphCount; ++i)
         {
-            const uint8_t phaseX = fractionalPhaseX ? static_cast<uint8_t>(fractionalPhaseX[i] & 0x03u) : 0;
-            const uint8_t phaseY = fractionalPhaseY ? static_cast<uint8_t>(fractionalPhaseY[i] & 0x03u) : 0;
-            const GlyphBitmap* bmp = RasterizeGlyph(fontPath, glyphIndices[i], pixelSize,
-                                                    fontWeight, phaseX, phaseY);
+            // NormalizePhase (% 3) is applied inside RasterizeGlyph, but we
+            // normalize here too for clarity and correct cache key computation.
+            const uint8_t phaseX = fractionalPhaseX
+                                       ? NormalizePhase(fractionalPhaseX[i])
+                                       : 0;
+            const uint8_t phaseY = fractionalPhaseY
+                                       ? NormalizePhase(fractionalPhaseY[i])
+                                       : 0;
+
+            const GlyphBitmap* bmp = RasterizeGlyph(
+                fontPath, glyphIndices[i], pixelSize, fontWeight, phaseX, phaseY);
             if (!bmp) continue;
 
-            PositionedGlyph pg;
+            PositionedGlyph pg{};
             pg.bitmap = bmp;
-            pg.offsetX = currentX + bmp->bearingX;
+            pg.offsetX = currentX + bmp->bearingX; // bearingX is unmodified FT value
             pg.offsetY = 0;
             result.push_back(pg);
 
-            if (lpDx && i < glyphCount)
+            if (lpDx)
             {
-                // GDI advances are pixel-based; internal coordinates are in LCD sub-samples.
+                // GDI advances are in logical pixels; internal coords are in LCD sub-samples.
                 currentX += lpDx[i] * 3;
             }
             else
@@ -299,4 +448,4 @@ namespace puretype
 
         return result;
     }
-}
+} // namespace puretype

@@ -27,6 +27,14 @@ namespace puretype
         int bearingX;
         int bearingY;
         int advanceX;
+
+        // Padding metadata — how many subpixel columns/rows of zero-padding
+        // surround the actual glyph data inside this bitmap.
+        // Downstream code must subtract these from the blit position so the
+        // visible glyph data lands at the correct screen coordinate.
+        int padLeft = 0; // subpixel columns of left padding
+        int padTop = 0; // pixel rows of top padding
+
         std::vector<uint8_t> data;
     };
 
@@ -134,10 +142,21 @@ namespace puretype
     private:
         FT_Library m_ftLibrary = nullptr;
 
-        std::unordered_map<std::string, FT_Face> m_faceCache;
+        // Face cache with LRU eviction (capped at MAX_FACE_CACHE_ENTRIES).
+        struct CachedFace
+        {
+            FT_Face face = nullptr;
+            std::list<std::string>::iterator lruIter;
+        };
+
+        static constexpr size_t MAX_FACE_CACHE_ENTRIES = 64;
+        std::unordered_map<std::string, CachedFace> m_faceCache;
+        std::list<std::string> m_faceLRU; // front = most recently used
+
         GlyphCache m_cache;
         std::mutex m_mutex;
 
         FT_Face GetOrLoadFace(const std::string& fontPath);
+        void EvictOldestFace();
     };
 }

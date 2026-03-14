@@ -1,11 +1,12 @@
-cmake_minimum_required(VERSION 3.20)
-project(PureType VERSION 0.1.0 LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.14)
+project(PureType VERSION 0.0.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
+# --- Dipendenze Esterne ---
 FetchContent_Declare(
         minhook
         GIT_REPOSITORY https://github.com/TsudaKageyu/minhook.git
@@ -25,6 +26,7 @@ set(FT_DISABLE_HARFBUZZ ON CACHE BOOL "" FORCE)
 set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(freetype)
 
+# --- Target Libreria (DLL) ---
 add_library(PureType SHARED
         src/dllmain.cpp
         src/config.cpp
@@ -81,7 +83,7 @@ target_link_libraries(puretype_exe PRIVATE
         advapi32.lib
 )
 
-# Copy .ini and .ico to output directory alongside PureType.dll
+# --- Operazioni Post-Build ---
 add_custom_command(TARGET PureType POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_CURRENT_SOURCE_DIR}/puretype.ini

@@ -1,4 +1,4 @@
-﻿#include "filters/subpixel_filter.h"
+#include "filters/subpixel_filter.h"
 #include "filters/tone_mapper.h"
 #include "rasterizer/ft_rasterizer.h"
 #include "color_math.h"
@@ -16,25 +16,12 @@ namespace puretype
 {
     namespace
     {
-        inline float Clamp01(float v)
+        float Clamp01(const float v)
         {
             return std::clamp(v, 0.0f, 1.0f);
         }
 
-        inline float PhaseFromQuant(uint8_t q, bool enabled)
-        {
-            if (!enabled) return 0.0f;
-            return 0.25f * static_cast<float>(q & 0x03u);
-        }
-
-        inline float ComputeLodRelax(float emSize, float thresholdSmall, float thresholdLarge)
-        {
-            const float span = std::max(1.0f, thresholdLarge - thresholdSmall);
-            const float t = std::clamp((emSize - thresholdSmall) / span, 0.0f, 1.0f);
-            return 1.0f - std::exp(-3.0f * t);
-        }
-
-        inline uint16_t QuantizeFloat(float v, float scale)
+        uint16_t QuantizeFloat(const float v, const float scale)
         {
             const float q = std::clamp(v * scale, 0.0f, 65535.0f);
             return static_cast<uint16_t>(q + 0.5f);
@@ -158,7 +145,6 @@ namespace puretype
             return cache;
         }
 
-        // Computes a unique cache key for a filtered glyph based on rasterization and filter parameters.
         FilterCacheKey BuildFilterKey(const GlyphBitmap& glyph, const ConfigData& cfg)
         {
             FilterCacheKey key;
@@ -166,10 +152,11 @@ namespace puretype
             key.glyphIndex = glyph.glyphIndex;
             key.pixelSize = static_cast<uint16_t>(std::min<uint32_t>(glyph.pixelSize, 65535));
             key.fontWeight = glyph.fontWeight;
-            key.phaseX = glyph.phaseX & 0x03u;
-            key.phaseY = glyph.phaseY & 0x03u;
+            key.phaseX = static_cast<uint8_t>(glyph.phaseX % 3u);
+            key.phaseY = static_cast<uint8_t>(glyph.phaseY % 3u);
             key.panelType = static_cast<uint8_t>(cfg.panelType);
-            key.flags = (cfg.stemDarkeningEnabled ? 1u : 0u) | (cfg.enableFractionalPositioning ? 2u : 0u);
+            key.flags = (cfg.stemDarkeningEnabled ? 1u : 0u)
+                | (cfg.enableFractionalPositioning ? 2u : 0u);
             key.filterStrengthQ = QuantizeFloat(cfg.filterStrength, 1024.0f);
             key.gammaQ = QuantizeFloat(cfg.gamma, 1024.0f);
             key.stemQ = QuantizeFloat(cfg.stemDarkeningStrength, 1024.0f);
@@ -183,51 +170,48 @@ namespace puretype
     std::unique_ptr<SubpixelFilter> SubpixelFilter::Create(int panelType)
     {
         if (panelType == static_cast<int>(PanelType::QD_OLED_TRIANGLE))
-        {
             return std::make_unique<TriangularFilter>();
-        }
         return std::make_unique<WOLEDFilter>();
     }
 
     inline float SampleContinuousX(const uint8_t* row, float fx, int width3x)
     {
-        int x0 = std::clamp(static_cast<int>(fx), 0, width3x - 1);
-        int x1 = std::clamp(x0 + 1, 0, width3x - 1);
-        float t = fx - static_cast<float>(x0);
+        const int x0 = std::clamp(static_cast<int>(fx), 0, width3x - 1);
+        const int x1 = std::clamp(x0 + 1, 0, width3x - 1);
+        const float t = fx - static_cast<float>(x0);
         return sRGBToLinear(row[x0]) * (1.0f - t) + sRGBToLinear(row[x1]) * t;
     }
 
-    RGBABitmap WOLEDFilter::Apply(const GlyphBitmap& glyph,
-                                  const ConfigData& cfg) const
+    RGBABitmap WOLEDFilter::Apply(const GlyphBitmap& glyph, const ConfigData& cfg) const
     {
         const FilterCacheKey cacheKey = BuildFilterKey(glyph, cfg);
-        RGBABitmap cached;
-        if (GetFilteredGlyphCache().TryGet(cacheKey, cached))
-        {
-            return cached;
-        }
+        if (RGBABitmap cached; GetFilteredGlyphCache().TryGet(cacheKey, cached)) return cached;
 
-        const int pixelWidth = glyph.width / 3;
+        const int pixelWidth = (glyph.width + 2) / 3;
         const int height = glyph.height;
 
         RGBABitmap result;
         result.width = pixelWidth;
         result.height = height;
-        result.pitch = pixelWidth * 4;
+        result.pitch = pixelWidth * 4; // 32bpp packed; always 4-byte aligned
 
         if (pixelWidth <= 0 || height <= 0) return result;
 
         result.data.resize(result.pitch * height, 0);
 
-        const float emSize = static_cast<float>(height);
+        const auto emSize = static_cast<float>(height);
         const float darkenAmount = cfg.stemDarkeningEnabled
                                        ? computeDarkenAmount(emSize, cfg.stemDarkeningStrength)
                                        : 0.0f;
 
-        const float FILTER_WEIGHTS[7] = {
-            1.0f / 16.0f, 2.0f / 16.0f, 3.0f / 16.0f, 4.0f / 16.0f,
-            3.0f / 16.0f, 2.0f / 16.0f, 1.0f / 16.0f
-        };
+        // The original 7-tap filter (1+2+3+4+3+2+1 / 16) spans 7/4 = 1.75 physical
+        // pixels for WOLED's 4-slot layout. This creates visible horizontal color
+        // fringing on thin strokes because energy from one pixel bleeds into the
+        // next. A 3-tap (0.25 / 0.50 / 0.25) spans exactly 3/4 = 0.75 pixels —
+        // enough to smooth quantization without inter-pixel crosstalk.
+        constexpr float FILTER_WEIGHTS[3] = {0.25f, 0.50f, 0.25f};
+        constexpr int FILTER_TAPS = 3;
+        constexpr int FILTER_CENTER = 1; // offset for i - center
 
         for (int y = 0; y < height; ++y)
         {
@@ -236,23 +220,24 @@ namespace puretype
 
             for (int px = 0; px < pixelWidth; ++px)
             {
-                float center_x = px * 3.0f + 1.0f;
-                cov4X[px * 4 + 0] = SampleContinuousX(row0, center_x - 1.125f, pixelWidth * 3);
-                cov4X[px * 4 + 1] = SampleContinuousX(row0, center_x - 0.375f, pixelWidth * 3);
-                cov4X[px * 4 + 2] = SampleContinuousX(row0, center_x + 0.375f, pixelWidth * 3);
-                cov4X[px * 4 + 3] = SampleContinuousX(row0, center_x + 1.125f, pixelWidth * 3);
+                const float center_x = px * 3.0f + 1.5f;
+                cov4X[px * 4 + 0] = SampleContinuousX(row0, center_x - 1.125f, glyph.width);
+                cov4X[px * 4 + 1] = SampleContinuousX(row0, center_x - 0.375f, glyph.width);
+                cov4X[px * 4 + 2] = SampleContinuousX(row0, center_x + 0.375f, glyph.width);
+                cov4X[px * 4 + 3] = SampleContinuousX(row0, center_x + 1.125f, glyph.width);
             }
 
             for (int px = 0; px < pixelWidth; ++px)
             {
-                int p = px * 4;
+                const int p = px * 4;
                 float a[4];
                 for (int slot = 0; slot < 4; ++slot)
                 {
                     float sum = 0.0f;
-                    for (int i = 0; i < 7; ++i)
+                    for (int i = 0; i < FILTER_TAPS; ++i)
                     {
-                        int srcP = std::clamp(p + slot + i - 3, 0, (pixelWidth * 4) - 1);
+                        const int srcP = std::clamp(p + slot + i - FILTER_CENTER,
+                                                    0, pixelWidth * 4 - 1);
                         sum += cov4X[srcP] * FILTER_WEIGHTS[i];
                     }
                     a[slot] = sum;
@@ -275,47 +260,57 @@ namespace puretype
                     alpha_b = a[3];
                 }
 
-                // WOLED (TCON Inversion Handling)
-                // Modern WOLED panels use an internal Timing Controller (TCON) to distribute luminance.
-                // By ensuring the target color is at least alpha_w, we guarantee the TCON can 
-                // extract the white component without crushing the chroma subpixels.
-                float final_r = std::max(alpha_r, alpha_w);
-                float final_g = std::max(alpha_g, alpha_w);
-                float final_b = std::max(alpha_b, alpha_w);
+
+                // The WOLED white subpixel physically drives R+G+B simultaneously
+                // via the TCON. When W fires, it "spills" luminance into the
+                // adjacent coloured subpixels even if those channels are dark —
+                // this is cross-talk. The reduction factor attenuates the white
+                // channel before the max() merge so that the colour channels
+                // dominate edge contrast.
+                //
+                // Formula: instead of std::max(alpha_X, alpha_w), we compute
+                //   std::max(alpha_X, alpha_w * (1 - crossTalk))
+                // At crossTalk=0.0 the behaviour is unchanged.
+                // At crossTalk=0.08 (default) W contributes 92% of its original
+                // intensity to each channel — enough to eliminate the grey haze on
+                // dark backgrounds without losing brightness on white text.
+                const float w_reduced = alpha_w * (1.0f - cfg.woledCrossTalkReduction);
+
+                float final_r = std::max(alpha_r, w_reduced);
+                float final_g = std::max(alpha_g, w_reduced);
+                float final_b = std::max(alpha_b, w_reduced);
 
                 final_r = applyStemDarkening(final_r, darkenAmount);
                 final_g = applyStemDarkening(final_g, darkenAmount);
                 final_b = applyStemDarkening(final_b, darkenAmount);
 
-                final_r = std::clamp(final_r, 0.0f, 1.0f);
-                final_g = std::clamp(final_g, 0.0f, 1.0f);
-                final_b = std::clamp(final_b, 0.0f, 1.0f);
-
-                float alpha = std::max({final_r, final_g, final_b});
+                final_r = Clamp01(final_r);
+                final_g = Clamp01(final_g);
+                final_b = Clamp01(final_b);
 
                 uint8_t* out = result.data.data() + y * result.pitch + px * 4;
-                out[0] = linearToSRGB(final_b);
-                out[1] = linearToSRGB(final_g);
-                out[2] = linearToSRGB(final_r);
-                out[3] = static_cast<uint8_t>(alpha * 255.0f + 0.5f);
+                const uint8_t byteB = linearToSRGB(final_b);
+                const uint8_t byteG = linearToSRGB(final_g);
+                const uint8_t byteR = linearToSRGB(final_r);
+                out[0] = byteB;
+                out[1] = byteG;
+                out[2] = byteR;
+                out[3] = std::max({byteR, byteG, byteB});
             }
         }
+
         ToneMapper::Apply(result, cfg);
         GetFilteredGlyphCache().Put(cacheKey, result);
         return result;
     }
 
-    RGBABitmap TriangularFilter::Apply(const GlyphBitmap& glyph,
-                                       const ConfigData& cfg) const
+    RGBABitmap TriangularFilter::Apply(const GlyphBitmap& glyph, const ConfigData& cfg) const
     {
         const FilterCacheKey cacheKey = BuildFilterKey(glyph, cfg);
         RGBABitmap cached;
-        if (GetFilteredGlyphCache().TryGet(cacheKey, cached))
-        {
-            return cached;
-        }
+        if (GetFilteredGlyphCache().TryGet(cacheKey, cached)) return cached;
 
-        const int pixelWidth = glyph.width / 3;
+        const int pixelWidth = (glyph.width + 2) / 3;
         const int height = glyph.height;
 
         RGBABitmap result;
@@ -331,63 +326,100 @@ namespace puretype
                                        ? computeDarkenAmount(emSize, cfg.stemDarkeningStrength)
                                        : 0.0f;
 
-        const float FILTER_WEIGHTS[5] = {1.0f / 9.0f, 2.0f / 9.0f, 3.0f / 9.0f, 2.0f / 9.0f, 1.0f / 9.0f};
-
+        // 5-tap FIR, symmetric, weights sum to 1.0 (1+2+3+2+1 = 9).
+        constexpr float FILTER_WEIGHTS[5] = {
+            1.0f / 9.0f, 2.0f / 9.0f, 3.0f / 9.0f, 2.0f / 9.0f, 1.0f / 9.0f
+        };
 
         for (int y = 0; y < height; ++y)
         {
             const uint8_t* row0 = glyph.data.data() + y * glyph.pitch;
+
+            // Model QD-OLED triangular subpixel geometry.
+            //
+            // In Samsung QD-OLED (AW3423DW, Odyssey G8 etc.) the RGB subpixels
+            // are arranged in triangles. Even and odd physical rows are
+            // horizontally offset by 1.5 subpixels relative to each other:
+            //
+            //   Even row:  [R . G . B . R . G . B]   x offsets 0, 1, 2 ...
+            //   Odd  row:   [. G . B . R . G . B .]  x offsets +1.5 subpx
+            //
+            // A pure horizontal sampling pass treats all rows as stripe-RGB,
+            // which is wrong for this geometry. The fix blends 25% of the
+            // adjacent row, shifted by ±1.5 subpixels, into the current row's
+            // coverage samples. This approximates how the triangular layout
+            // shares coverage between physical rows.
+            //
+            // Even rows look 25% down (adjacent row is +1.5 subpx to the right).
+            // Odd  rows look 25% up   (adjacent row is -1.5 subpx to the left).
+            const int yAdj = (y % 2 == 0)
+                                 ? std::min(y + 1, height - 1) // even: look at row below
+                                 : std::max(y - 1, 0); // odd:  look at row above
+            const uint8_t* rowAdj = glyph.data.data() + yAdj * glyph.pitch;
+
+            // Horizontal shift of the adjacent row in subpixel units.
+            // +1.5 for even rows (adjacent row is shifted right),
+            // -1.5 for odd  rows (adjacent row is shifted left).
+            const float kAdjShift = (y % 2 == 0) ? +1.5f : -1.5f;
+            constexpr float kVertBlend = 0.25f; // 25% from adjacent row
+
             std::vector<float> cov3X(pixelWidth * 3);
 
             for (int px = 0; px < pixelWidth; ++px)
             {
-                float cxR = px * 3.0f + 0.5f;
-                float cxG = px * 3.0f + 1.0f;
-                float cxB = px * 3.0f + 1.5f;
+                for (int slot = 0; slot < 3; ++slot)
+                {
+                    const float fxMain = px * 3.0f + slot + 0.5f;
+                    const float fxAdj = fxMain + kAdjShift;
 
-                cov3X[px * 3 + 0] = SampleContinuousX(row0, cxR, pixelWidth * 3);
-                cov3X[px * 3 + 1] = SampleContinuousX(row0, cxG, pixelWidth * 3);
-                cov3X[px * 3 + 2] = SampleContinuousX(row0, cxB, pixelWidth * 3);
+                    const float s0 = SampleContinuousX(row0, fxMain, glyph.width);
+                    const float s1 = SampleContinuousX(rowAdj, fxAdj, glyph.width);
+
+                    // Blend: primary row contributes 75%, adjacent 25%.
+                    cov3X[px * 3 + slot] = s0 * (1.0f - kVertBlend) + s1 * kVertBlend;
+                }
             }
 
             for (int px = 0; px < pixelWidth; ++px)
             {
-                int p = px * 3;
+                const int p = px * 3;
                 float filt[3];
                 for (int slot = 0; slot < 3; ++slot)
                 {
                     float sum = 0.0f;
                     for (int i = 0; i < 5; ++i)
                     {
-                        int srcP = std::clamp(p + slot + i - 2, 0, (pixelWidth * 3) - 1);
+                        const int srcP = std::clamp(p + slot + i - 2, 0, pixelWidth * 3 - 1);
                         sum += cov3X[srcP] * FILTER_WEIGHTS[i];
                     }
                     filt[slot] = sum;
                 }
 
-                float final_r = std::clamp(filt[0], 0.0f, 1.0f);
-                float final_g = std::clamp(filt[1], 0.0f, 1.0f);
-                float final_b = std::clamp(filt[2], 0.0f, 1.0f);
+                float final_r = Clamp01(filt[0]);
+                float final_g = Clamp01(filt[1]);
+                float final_b = Clamp01(filt[2]);
 
                 final_r = applyStemDarkening(final_r, darkenAmount);
                 final_g = applyStemDarkening(final_g, darkenAmount);
                 final_b = applyStemDarkening(final_b, darkenAmount);
 
-                final_r = std::clamp(final_r, 0.0f, 1.0f);
-                final_g = std::clamp(final_g, 0.0f, 1.0f);
-                final_b = std::clamp(final_b, 0.0f, 1.0f);
-
-                float alpha = std::max({final_r, final_g, final_b});
+                final_r = Clamp01(final_r);
+                final_g = Clamp01(final_g);
+                final_b = Clamp01(final_b);
 
                 uint8_t* out = result.data.data() + y * result.pitch + px * 4;
-                out[0] = linearToSRGB(final_b);
-                out[1] = linearToSRGB(final_g);
-                out[2] = linearToSRGB(final_r);
-                out[3] = static_cast<uint8_t>(alpha * 255.0f + 0.5f);
+                const uint8_t byteB = linearToSRGB(final_b);
+                const uint8_t byteG = linearToSRGB(final_g);
+                const uint8_t byteR = linearToSRGB(final_r);
+                out[0] = byteB;
+                out[1] = byteG;
+                out[2] = byteR;
+                out[3] = std::max({byteR, byteG, byteB});
             }
         }
+
         ToneMapper::Apply(result, cfg);
         GetFilteredGlyphCache().Put(cacheKey, result);
         return result;
     }
-}
+} // namespace puretype

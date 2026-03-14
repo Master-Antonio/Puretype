@@ -1,6 +1,6 @@
 #include <Windows.h>
 #include <string>
-#include <algorithm>
+#include <mutex>
 
 #include "puretype.h"
 #include "config.h"
@@ -15,15 +15,18 @@ namespace
 {
     FILE* g_logFile = nullptr;
     HMODULE g_hSelfModule = nullptr;
+    std::mutex g_logMutex; // Thread-safe logging
 
     void LogInit(const std::string& path)
     {
         if (!puretype::Config::Instance().Data().debugEnabled) return;
+        std::lock_guard lock(g_logMutex);
         fopen_s(&g_logFile, path.c_str(), "w");
     }
 
     void LogShutdown()
     {
+        std::lock_guard lock(g_logMutex);
         if (g_logFile)
         {
             fclose(g_logFile);
@@ -31,8 +34,10 @@ namespace
         }
     }
 
-    static const wchar_t* const kBlacklist[] = {
-
+    const wchar_t* const kBlacklist[] = {
+        // --- Windows core / system processes ---
+        // These processes must never be hooked: injecting into them causes
+        // boot failures, session crashes, or security product false positives.
         L"csrss.exe",
         L"smss.exe",
         L"lsass.exe",
@@ -57,6 +62,9 @@ namespace
         L"SecurityHealthService.exe",
         L"MsMpEng.exe",
 
+        // --- Anti-cheat / game security ---
+        // These processes run their own kernel-level integrity checks.
+        // Hooking their DWrite/GDI calls will trigger detections and bans.
         L"vgc.exe",
         L"vgtray.exe",
         L"EasyAntiCheat.exe",
@@ -70,6 +78,7 @@ namespace
         L"faceit.exe",
         L"FACEIT_AC.exe",
 
+        // --- Games (anti-cheat / VAC / EAC protected) ---
         L"csgo.exe",
         L"cs2.exe",
         L"valorant.exe",
@@ -84,6 +93,9 @@ namespace
         L"destiny2.exe",
         L"Tarkov.exe",
 
+        // --- Browsers (Chromium/Gecko sandboxing) ---
+        // These processes use the Chromium sandbox which restricts DLL injection.
+        // Hooking them causes renderer crashes and GPU process failures.
         L"chrome.exe",
         L"msedge.exe",
         L"firefox.exe",
@@ -91,10 +103,32 @@ namespace
         L"brave.exe",
         L"vivaldi.exe",
 
+        // --- Qt framework applications (Bug 5 fix) ---
+        //
+        // Qt has its own internal FreeType rasterizer and layout engine. It
+        // computes glyph bounding boxes and advance widths BEFORE calling
+        // ExtTextOutW / DrawGlyphRun, using its own metrics. When PureType
+        // replaces the glyph bitmap with one at pixelWidth = (ftWidth+2)/3
+        // — one third the width Qt reserved — Qt clips the blitted bitmap
+        // against the bounding box it calculated, cutting off most of the
+        // glyph and making strings illegible.
+        //
+        // Dynamic detection (IsQtWindow in gdi_hooks.cpp) handles most
+        // cases, but process-level blacklisting covers Qt apps that render
+        // into off-screen DCs not associated with a window (e.g. print
+        // preview, custom paint surfaces).
+        L"Configurator.exe", // EqualizerAPO configuration GUI
+        L"Peace.exe", // Peace equalizer (Qt-based EqAPO frontend)
+        L"APO Host Utility.exe", // EqualizerAPO host
+        L"EqualizerAPO.exe", // EqualizerAPO service GUI variant
+        L"VoiceMeeter.exe", // VoiceMeeter (Qt UI components)
+        L"VoiceMeeterBanana.exe",
+        L"VoiceMeeterPotato.exe",
+
         nullptr
     };
 
-    static bool IsProcessBlacklisted()
+    bool IsProcessBlacklisted()
     {
         wchar_t exePath[MAX_PATH] = {};
         GetModuleFileNameW(nullptr, exePath, MAX_PATH);
@@ -116,8 +150,10 @@ namespace
     }
 }
 
+//Thread-safe logging — all hook threads can call this concurrently.
 void PureTypeLog(const char* fmt, ...)
 {
+    std::lock_guard lock(g_logMutex);
     if (!g_logFile) return;
     va_list args;
     va_start(args, fmt);
@@ -127,24 +163,23 @@ void PureTypeLog(const char* fmt, ...)
     va_end(args);
 }
 
-static std::string GetDllDirectory(HMODULE hModule)
+static std::string GetDllDirectory(const HMODULE hModule)
 {
     char path[MAX_PATH] = {};
     GetModuleFileNameA(hModule, path, MAX_PATH);
     std::string dir(path);
-    auto pos = dir.find_last_of("\\/");
-    if (pos != std::string::npos) dir = dir.substr(0, pos + 1);
+    if (const auto pos = dir.find_last_of("\\/"); pos != std::string::npos) dir = dir.substr(0, pos + 1);
     return dir;
 }
 
 extern "C" __declspec(dllexport)
-LRESULT CALLBACK PureTypeCBTProc(int nCode, WPARAM wParam, LPARAM lParam)
+LRESULT CALLBACK PureTypeCBTProc(const int nCode, const WPARAM wParam, const LPARAM lParam)
 {
     // Hook proc exists only to force DLL load in target processes.
     return CallNextHookEx(nullptr, nCode, wParam, lParam);
 }
 
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
+BOOL APIENTRY DllMain(const HMODULE hModule, const DWORD reason, LPVOID)
 {
     switch (reason)
     {
@@ -152,7 +187,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
         {
             if (IsProcessBlacklisted())
             {
-                // Returning FALSE from process attach aborts injection for this process.
                 return FALSE;
             }
 
@@ -167,7 +201,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
 
             if (puretype::Config::Instance().Data().debugEnabled)
             {
-                std::string logPath = dllDir +
+                const std::string logPath = dllDir +
                     puretype::Config::Instance().Data().logFile;
                 LogInit(logPath);
 
@@ -178,11 +212,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
                             PURETYPE_VERSION_MINOR,
                             PURETYPE_VERSION_PATCH);
                 PureTypeLog("Host process: %ls", hostExe);
-                const char* panelName = "RWBG";
+                auto panelName = "RWBG";
                 if (puretype::Config::Instance().Data().panelType == puretype::PanelType::QD_OLED_TRIANGLE)
-                    panelName =
-                        "QD_OLED_TRIANGLE";
-                else if (puretype::Config::Instance().Data().panelType == puretype::PanelType::RGWB) panelName = "RGWB";
+                    panelName = "QD_OLED_TRIANGLE";
+                else if (puretype::Config::Instance().Data().panelType == puretype::PanelType::RGWB)
+                    panelName = "RGWB";
                 PureTypeLog("Panel type: %s", panelName);
                 PureTypeLog("Filter strength: %.2f",
                             puretype::Config::Instance().Data().filterStrength);
@@ -239,7 +273,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
                 PureTypeLog("GDI hooks installed");
             }
 
-            mhStatus = MH_EnableHook(MH_ALL_HOOKS);
+            mhStatus = MH_EnableHook(nullptr);
             if (mhStatus != MH_OK)
             {
                 PureTypeLog("ERROR: MH_EnableHook(ALL) failed: %s",
@@ -258,7 +292,37 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
         {
             PureTypeLog("=== PureType shutting down ===");
 
-            MH_DisableHook(MH_ALL_HOOKS);
+            // Safe shutdown with reference-counted spin-wait.
+            //
+            // Step 1: Disable all hooks to prevent NEW entries into our code.
+            MH_DisableHook(nullptr);
+            PureTypeLog("Hooks disabled (no new entries)");
+
+            // Step 2: Spin-wait until all in-flight hook calls complete.
+            // g_activeHookCount tracks how many threads are currently inside
+            // our hook functions. We wait up to 100ms for them to finish.
+            {
+                constexpr int kMaxWaitMs = 100;
+                int waited = 0;
+                while (puretype::g_activeHookCount.load(std::memory_order_acquire) > 0
+                    && waited < kMaxWaitMs)
+                {
+                    constexpr int kPollIntervalMs = 2;
+                    Sleep(kPollIntervalMs);
+                    waited += kPollIntervalMs;
+                }
+                if (waited >= kMaxWaitMs)
+                {
+                    PureTypeLog("WARNING: Timed out waiting for %d active hooks to complete",
+                                puretype::g_activeHookCount.load());
+                }
+                else
+                {
+                    PureTypeLog("All active hooks completed (waited %dms)", waited);
+                }
+            }
+
+            // Step 3: Now safe to remove hooks and destroy resources.
             puretype::hooks::RemoveDWriteHooks();
             puretype::hooks::RemoveGDIHooks();
             PureTypeLog("Hooks removed");
