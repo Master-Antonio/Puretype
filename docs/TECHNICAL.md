@@ -1,7 +1,5 @@
-![PureType icon](src/puretype.png)
+# Support me:
 
-
-## Support me:
 https://paypal.me/masterantonio
 
 # PureType — Technical Documentation
@@ -168,12 +166,12 @@ ClearType subpixel centres: R=1/6, G=3/6, B=5/6.
 
 Nearest-match assignment:
 
-| WOLED subpixel | Physical centre | ClearType source | Mapping |
-|---|---|---|---|
-| R | 1/8 = 0.125 | CT R at 1/6 = 0.167 | `alpha_R = maskR` |
-| W | 3/8 = 0.375 | CT G at 3/6 = 0.500 | `alpha_W = maskG × (1 − crossTalk)` |
-| B | 5/8 = 0.625 | between CT G and CT B | `alpha_B = (maskG + maskB) / 2` |
-| G | 7/8 = 0.875 | CT B at 5/6 = 0.833 | `alpha_G = maskB` |
+| WOLED subpixel | Physical centre | ClearType source      | Mapping                             |
+|----------------|-----------------|-----------------------|-------------------------------------|
+| R              | 1/8 = 0.125     | CT R at 1/6 = 0.167   | `alpha_R = maskR`                   |
+| W              | 3/8 = 0.375     | CT G at 3/6 = 0.500   | `alpha_W = maskG × (1 − crossTalk)` |
+| B              | 5/8 = 0.625     | between CT G and CT B | `alpha_B = (maskG + maskB) / 2`     |
+| G              | 7/8 = 0.875     | CT B at 5/6 = 0.833   | `alpha_G = maskB`                   |
 
 The W subpixel drives R, G, B simultaneously via TCON hardware. Final channel
 coverage uses `max()` to model the TCON `OR` behaviour:
@@ -192,12 +190,12 @@ emitters on the WOLED panel.
 
 RGWB subpixel centres: R=1/8, G=3/8, W=5/8, B=7/8.
 
-| WOLED subpixel | ClearType source |
-|---|---|
-| R | `maskR` |
-| G | `maskG` |
-| W | `maskB × (1 − crossTalk)` |
-| B | `maskB` |
+| WOLED subpixel | ClearType source          |
+|----------------|---------------------------|
+| R              | `maskR`                   |
+| G              | `maskG`                   |
+| W              | `maskB × (1 − crossTalk)` |
+| B              | `maskB`                   |
 
 ```
 finalR = max(maskR, alpha_W)
@@ -237,12 +235,12 @@ finalB = Y + (finalB − Y) × chromaKeep
 luma — identical channels, no subpixel benefit. The operating range is 0.70–0.85,
 depending on font size:
 
-| Size | QD-OLED | RWBG/RGWB |
-|---|---|---|
-| ≤ 18 px | 0.70 | 0.72 |
-| 19–24 px | 0.75 | 0.77 |
-| 25–32 px | 0.80 | 0.82 |
-| > 32 px | 0.83 | 0.85 |
+| Size     | QD-OLED | RWBG/RGWB |
+|----------|---------|-----------|
+| ≤ 18 px  | 0.70    | 0.72      |
+| 19–24 px | 0.75    | 0.77      |
+| 25–32 px | 0.80    | 0.82      |
+| > 32 px  | 0.83    | 0.85      |
 
 Larger text receives more chroma because wider stems span multiple subpixels
 cleanly, making full subpixel colouring perceptually correct rather than distracting.
@@ -298,10 +296,10 @@ Key parameters:
 
 **Hinting target (Bug 3 fix)**
 
-| Panel | FreeType load flag | Rationale |
-|---|---|---|
-| RWBG / RGWB | `FT_LOAD_TARGET_LCD` | Horizontal-stripe hinting; biases stem edges toward horizontal subpixel boundaries |
-| QD-OLED triangular | `FT_LOAD_TARGET_NORMAL` | Isotropic hinting; no horizontal-stripe bias for triangular layout |
+| Panel              | FreeType load flag      | Rationale                                                                          |
+|--------------------|-------------------------|------------------------------------------------------------------------------------|
+| RWBG / RGWB        | `FT_LOAD_TARGET_LCD`    | Horizontal-stripe hinting; biases stem edges toward horizontal subpixel boundaries |
+| QD-OLED triangular | `FT_LOAD_TARGET_NORMAL` | Isotropic hinting; no horizontal-stripe bias for triangular layout                 |
 
 Both paths use `FT_RENDER_MODE_LCD` to produce the 3× horizontal oversampled
 bitmap that the subpixel filter expects.
@@ -339,22 +337,22 @@ rasterized row above and below it.
 
 All parameters live in `puretype.ini` next to the DLL.
 
-| Key | Type | Range | Default | Description |
-|---|---|---|---|---|
-| `panelType` | enum | `rwbg`, `rgwb`, `qd_oled_triangle` | `rwbg` | Physical subpixel layout of the target display |
-| `filterStrength` | float | 0.0 – 5.0 | 1.0 | Master filter intensity. 0 = passthrough |
-| `gamma` | float | 0.5 – 3.0 | 1.0 | Rasterization gamma correction |
-| `enableSubpixelHinting` | bool | — | true | FreeType `FT_LOAD_FORCE_AUTOHINT` |
-| `enableFractionalPositioning` | bool | — | true | Sub-pixel X placement |
-| `lodThresholdSmall` | float | 6 – 96 | 10.0 | px below which small-text path activates |
-| `lodThresholdLarge` | float | lodSmall+1 – 160 | 22.0 | px above which large-text path activates |
-| `woledCrossTalkReduction` | float | 0.0 – 1.0 | 0.08 | W subpixel attenuation factor (WOLED only) |
-| `lumaContrastStrength` | float | 1.0 – 3.0 | 1.15 | S-curve contrast multiplier |
-| `stemDarkeningEnabled` | bool | — | true | Darken thin vertical stems |
-| `stemDarkeningStrength` | float | 0.0 – ∞ | 0.25 | Stem darkening intensity |
-| `debug.enabled` | bool | — | false | Write log file |
-| `debug.logFile` | string | — | PURETYPE.log | Log file path (relative to DLL) |
-| `debug.highlightRenderedGlyphs` | bool | — | false | Tint PureType-rendered glyphs cyan |
+| Key                             | Type   | Range                              | Default      | Description                                    |
+|---------------------------------|--------|------------------------------------|--------------|------------------------------------------------|
+| `panelType`                     | enum   | `rwbg`, `rgwb`, `qd_oled_triangle` | `rwbg`       | Physical subpixel layout of the target display |
+| `filterStrength`                | float  | 0.0 – 5.0                          | 1.0          | Master filter intensity. 0 = passthrough       |
+| `gamma`                         | float  | 0.5 – 3.0                          | 1.0          | Rasterization gamma correction                 |
+| `enableSubpixelHinting`         | bool   | —                                  | true         | FreeType `FT_LOAD_FORCE_AUTOHINT`              |
+| `enableFractionalPositioning`   | bool   | —                                  | true         | Sub-pixel X placement                          |
+| `lodThresholdSmall`             | float  | 6 – 96                             | 10.0         | px below which small-text path activates       |
+| `lodThresholdLarge`             | float  | lodSmall+1 – 160                   | 22.0         | px above which large-text path activates       |
+| `woledCrossTalkReduction`       | float  | 0.0 – 1.0                          | 0.08         | W subpixel attenuation factor (WOLED only)     |
+| `lumaContrastStrength`          | float  | 1.0 – 3.0                          | 1.15         | S-curve contrast multiplier                    |
+| `stemDarkeningEnabled`          | bool   | —                                  | true         | Darken thin vertical stems                     |
+| `stemDarkeningStrength`         | float  | 0.0 – ∞                            | 0.25         | Stem darkening intensity                       |
+| `debug.enabled`                 | bool   | —                                  | false        | Write log file                                 |
+| `debug.logFile`                 | string | —                                  | PURETYPE.log | Log file path (relative to DLL)                |
+| `debug.highlightRenderedGlyphs` | bool   | —                                  | false        | Tint PureType-rendered glyphs cyan             |
 
 ---
 
