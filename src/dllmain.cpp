@@ -103,28 +103,6 @@ namespace
         L"brave.exe",
         L"vivaldi.exe",
 
-        // --- Qt framework applications (Bug 5 fix) ---
-        //
-        // Qt has its own internal FreeType rasterizer and layout engine. It
-        // computes glyph bounding boxes and advance widths BEFORE calling
-        // ExtTextOutW / DrawGlyphRun, using its own metrics. When PureType
-        // replaces the glyph bitmap with one at pixelWidth = (ftWidth+2)/3
-        // — one third the width Qt reserved — Qt clips the blitted bitmap
-        // against the bounding box it calculated, cutting off most of the
-        // glyph and making strings illegible.
-        //
-        // Dynamic detection (IsQtWindow in gdi_hooks.cpp) handles most
-        // cases, but process-level blacklisting covers Qt apps that render
-        // into off-screen DCs not associated with a window (e.g. print
-        // preview, custom paint surfaces).
-        L"Configurator.exe", // EqualizerAPO configuration GUI
-        L"Peace.exe", // Peace equalizer (Qt-based EqAPO frontend)
-        L"APO Host Utility.exe", // EqualizerAPO host
-        L"EqualizerAPO.exe", // EqualizerAPO service GUI variant
-        L"VoiceMeeter.exe", // VoiceMeeter (Qt UI components)
-        L"VoiceMeeterBanana.exe",
-        L"VoiceMeeterPotato.exe",
-
         nullptr
     };
 

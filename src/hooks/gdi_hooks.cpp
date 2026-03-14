@@ -1,13 +1,9 @@
 #include "hooks/gdi_hooks.h"
 #include "config.h"
 #include "puretype.h"
-#include "rasterizer/ft_rasterizer.h"
-#include "filters/subpixel_filter.h"
-#include "output/blender.h"
 
 #include <MinHook.h>
 #include <Windows.h>
-#include <dwrite.h>
 #include <algorithm>
 #include <cmath>
 #include <string>
@@ -22,307 +18,82 @@ extern void PureTypeLog(const char* fmt, ...);
 namespace puretype::hooks
 {
     using ExtTextOutW_t = BOOL(WINAPI*)(HDC, int, int, UINT, const RECT*, LPCWSTR, UINT, const INT*);
-    static ExtTextOutW_t g_OrigExtTextOutW = nullptr;
-
     using DrawTextW_t = int(WINAPI*)(HDC, LPCWSTR, int, LPRECT, UINT);
-    static DrawTextW_t g_OrigDrawTextW = nullptr;
-
     using DrawTextExW_t = int(WINAPI*)(HDC, LPWSTR, int, LPRECT, UINT, LPDRAWTEXTPARAMS);
-    static DrawTextExW_t g_OrigDrawTextExW = nullptr;
-
     using PolyTextOutW_t = BOOL(WINAPI*)(HDC, const POLYTEXTW*, int);
+
+    static ExtTextOutW_t g_OrigExtTextOutW = nullptr;
+    static DrawTextW_t g_OrigDrawTextW = nullptr;
+    static DrawTextExW_t g_OrigDrawTextExW = nullptr;
     static PolyTextOutW_t g_OrigPolyTextOutW = nullptr;
 
-    static std::string WideToUtf8(const std::wstring& ws)
-    {
-        if (ws.empty()) return {};
-        const int len = WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, nullptr, 0, nullptr, nullptr);
-        if (len <= 1) return {};
-        std::string out(static_cast<size_t>(len), '\0');
-        WideCharToMultiByte(CP_UTF8, 0, ws.c_str(), -1, out.data(), len, nullptr, nullptr);
-        if (!out.empty() && out.back() == '\0') out.pop_back();
-        return out;
-    }
-
-    // -----------------------------------------------------------------------
-    // Qt window class detector.
+    // =========================================================================
+    // ARCHITECTURE: post-processing (universal compatibility)
+    // =========================================================================
     //
-    // Qt computes glyph metrics (advance widths, bounding boxes) using its
-    // own internal FreeType build before calling ExtTextOutW. By the time our
-    // hook fires, Qt has already reserved exactly (original_width) pixels of
-    // horizontal space for the glyph run. Our filter returns a bitmap that is
-    // (original_width + 2) / 3 pixels wide — one third of what Qt expects.
-    // Qt clips the blit to the bounding box it owns, cutting off roughly two
-    // thirds of the glyph and making the text illegible.
+    // The previous "replace rendering" approach rasterized glyphs with FreeType
+    // and blitted the result, bypassing GDI entirely. This broke any framework
+    // that pre-computed its own layout metrics (Qt, MFC, custom paint engines)
+    // because those frameworks reserved bounding boxes based on GDI metrics —
+    // our FreeType metrics differed, and the result was clipped or mis-placed.
     //
-    // Detection strategy: Qt top-level windows and their children register
-    // with class names that begin with "Qt5" or "Qt6". If the DC is associated
-    // with a Qt window, we must pass through to the original GDI call
-    // unchanged so Qt's own renderer handles everything.
+    // The new approach leaves GDI's rendering pipeline COMPLETELY INTACT:
     //
-    // Edge cases handled:
-    //   - WindowFromDC() can return NULL for memory DCs, printer DCs, and
-    //     off-screen surfaces. In these cases we return false (allow hook)
-    //     because there is no window layout engine to conflict with.
-    //   - Qt windows occasionally render into child DCs whose HWND has a
-    //     non-Qt class but whose root window is Qt. We walk up to the root
-    //     with GetAncestor() and check there too.
-    // -----------------------------------------------------------------------
-    static bool IsQtWindow(HDC hdc)
-    {
-        if (!hdc) return false;
-
-        HWND hwnd = WindowFromDC(hdc);
-        if (!hwnd) return false; // memory DC or off-screen surface — allow hook
-
-        // Check immediate window class.
-        char className[128] = {};
-        if (GetClassNameA(hwnd, className, sizeof(className)) > 0)
-        {
-            if (strncmp(className, "Qt5", 3) == 0 || strncmp(className, "Qt6", 3) == 0)
-                return true;
-        }
-
-        // Check root ancestor class (handles child widgets rendered via parent DC).
-        HWND root = GetAncestor(hwnd, GA_ROOT);
-        if (root && root != hwnd)
-        {
-            char rootClass[128] = {};
-            if (GetClassNameA(root, rootClass, sizeof(rootClass)) > 0)
-            {
-                if (strncmp(rootClass, "Qt5", 3) == 0 || strncmp(rootClass, "Qt6", 3) == 0)
-                    return true;
-            }
-        }
-
-        return false;
-    }
-
-    static std::string GetFontPathFromDWriteFace(IDWriteFontFace* fontFace)
-    {
-        if (!fontFace) return {};
-
-        UINT32 fileCount = 0;
-        HRESULT hr = fontFace->GetFiles(&fileCount, nullptr);
-        if (FAILED(hr) || fileCount == 0) return {};
-
-        std::vector<IDWriteFontFile*> files(fileCount, nullptr);
-        hr = fontFace->GetFiles(&fileCount, files.data());
-        if (FAILED(hr) || files.empty()) return {};
-
-        auto releaseFiles = [&]()
-        {
-            for (auto* file : files)
-                if (file) file->Release();
-        };
-
-        IDWriteFontFileLoader* loader = nullptr;
-        hr = files[0]->GetLoader(&loader);
-        if (FAILED(hr) || !loader)
-        {
-            releaseFiles();
-            return {};
-        }
-
-        const void* key = nullptr;
-        UINT32 keySize = 0;
-        hr = files[0]->GetReferenceKey(&key, &keySize);
-        if (FAILED(hr) || !key || keySize == 0)
-        {
-            loader->Release();
-            releaseFiles();
-            return {};
-        }
-
-        std::string pathUtf8;
-        IDWriteLocalFontFileLoader* localLoader = nullptr;
-        hr = loader->QueryInterface(__uuidof(IDWriteLocalFontFileLoader),
-                                    reinterpret_cast<void**>(&localLoader));
-        if (SUCCEEDED(hr) && localLoader)
-        {
-            UINT32 pathLen = 0;
-            hr = localLoader->GetFilePathLengthFromKey(key, keySize, &pathLen);
-            if (SUCCEEDED(hr) && pathLen > 0)
-            {
-                std::wstring path(pathLen + 1, L'\0');
-                hr = localLoader->GetFilePathFromKey(key, keySize, path.data(),
-                                                     static_cast<UINT32>(path.size()));
-                if (SUCCEEDED(hr))
-                {
-                    if (!path.empty() && path.back() == L'\0') path.pop_back();
-                    pathUtf8 = WideToUtf8(path);
-                }
-            }
-            localLoader->Release();
-        }
-
-        loader->Release();
-        releaseFiles();
-        return pathUtf8;
-    }
-
-    static std::string GetFontPathFromHDC(HDC hdc)
-    {
-        auto hFont = static_cast<HFONT>(GetCurrentObject(hdc, OBJ_FONT));
-        if (!hFont) return "";
-
-        LOGFONTW lf = {};
-        if (GetObjectW(hFont, sizeof(lf), &lf) == 0) return "";
-
-        wchar_t fontDir[MAX_PATH] = {};
-        GetWindowsDirectoryW(fontDir, MAX_PATH);
-        std::wstring fontDirStr(fontDir);
-        fontDirStr += L"\\Fonts\\";
-
-        std::wstring faceName(lf.lfFaceName);
-
-        HKEY hKey = nullptr;
-        std::wstring fontPath;
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                          L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Fonts",
-                          0, KEY_READ, &hKey) == ERROR_SUCCESS)
-        {
-            DWORD index = 0;
-            wchar_t valueName[256];
-            DWORD valueNameSize;
-            BYTE valueData[MAX_PATH * 2];
-            DWORD valueDataSize;
-            DWORD valueType;
-
-            while (true)
-            {
-                valueNameSize = 256;
-                valueDataSize = sizeof(valueData);
-                LONG result = RegEnumValueW(hKey, index++, valueName, &valueNameSize,
-                                            nullptr, &valueType, valueData, &valueDataSize);
-                if (result != ERROR_SUCCESS) break;
-
-                std::wstring entryName(valueName);
-                if (entryName.find(faceName) != std::wstring::npos)
-                {
-                    std::wstring fileName(reinterpret_cast<wchar_t*>(valueData));
-                    if (fileName.find(L'\\') == std::wstring::npos &&
-                        fileName.find(L'/') == std::wstring::npos)
-                        fontPath = fontDirStr + fileName;
-                    else
-                        fontPath = fileName;
-                    break;
-                }
-            }
-            RegCloseKey(hKey);
-        }
-
-        if (!fontPath.empty()) return WideToUtf8(fontPath);
-
-        IDWriteFactory* factory = nullptr;
-        HRESULT hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory),
-                                         reinterpret_cast<IUnknown**>(&factory));
-        if (SUCCEEDED(hr) && factory)
-        {
-            IDWriteGdiInterop* interop = nullptr;
-            hr = factory->GetGdiInterop(&interop);
-            if (SUCCEEDED(hr) && interop)
-            {
-                IDWriteFontFace* face = nullptr;
-                hr = interop->CreateFontFaceFromHdc(hdc, &face);
-                if (SUCCEEDED(hr) && face)
-                {
-                    std::string exactPath = GetFontPathFromDWriteFace(face);
-                    face->Release();
-                    interop->Release();
-                    factory->Release();
-                    if (!exactPath.empty()) return exactPath;
-                }
-                else
-                {
-                    if (face) face->Release();
-                    interop->Release();
-                    factory->Release();
-                }
-            }
-            else
-            {
-                if (interop) interop->Release();
-                factory->Release();
-            }
-        }
-
-        std::wstring segoePath = fontDirStr + L"segoeui.ttf";
-        if (GetFileAttributesW(segoePath.c_str()) != INVALID_FILE_ATTRIBUTES)
-            return WideToUtf8(segoePath);
-
-        return {};
-    }
-
-    static uint32_t GetFontPixelSize(HDC hdc)
-    {
-        TEXTMETRICW tm = {};
-        if (GetTextMetricsW(hdc, &tm))
-        {
-            int emHeight = tm.tmHeight - tm.tmInternalLeading;
-            return static_cast<uint32_t>(emHeight > 0 ? emHeight : 16);
-        }
-        return 16;
-    }
-
-    static std::vector<uint16_t> TextToGlyphIndices(HDC hdc, LPCWSTR text, UINT count, bool isGlyphIndex)
-    {
-        std::vector<uint16_t> indices(count);
-        if (isGlyphIndex)
-        {
-            for (UINT i = 0; i < count; ++i)
-            {
-                indices[i] = static_cast<uint16_t>(text[i]);
-                if (indices[i] == 0xFFFF) return {};
-            }
-        }
-        else
-        {
-            DWORD result = GetGlyphIndicesW(hdc, text, static_cast<int>(count),
-                                            indices.data(), GGI_MARK_NONEXISTING_GLYPHS);
-            if (result == GDI_ERROR) return {};
-            for (UINT i = 0; i < count; ++i)
-                if (indices[i] == 0xFFFF) return {};
-        }
-        return indices;
-    }
-
-    // -----------------------------------------------------------------------
-    // Composited background blit helper.
+    //   1. Capture the HDC region before calling GDI.
+    //   2. Let GDI render with ClearType (unmodified call).
+    //   3. Capture the same region after.
+    //   4. For every pixel that changed: extract the per-channel subpixel
+    //      coverage ClearType encoded, then re-blend using OLED-correct mapping.
+    //   5. Write the result back to the HDC.
     //
-    // Instead of each glyph capturing its own slice of the HDC background
-    // (which causes double-blending when glyphs overlap or the HDC already
-    // contains a previous render of the same text), we capture the ENTIRE
-    // background band ONCE before any glyphs are rendered, then each glyph
-    // reads from that pre-captured copy.
+    // This is universally compatible because:
+    //   - GDI handles ALL metrics, positioning, clipping, font loading.
+    //   - We only change pixel VALUES, never layout or advance widths.
+    //   - Works identically for Qt5/Qt6, MFC, WinForms, Win32, WPF-GDI,
+    //     EqualizerAPO, VoiceMeeter, legacy apps, CJK IMEs — everything.
     //
-    // This fixes:
-    //   - Notepad "blurry while typing" (TRANSPARENT-mode re-render over
-    //     previously-rendered text doubles the coverage → blurry)
-    //   - Any app that re-renders text in-place without clearing first
-    // -----------------------------------------------------------------------
-    struct BackgroundCapture
-    {
-        std::vector<uint8_t> data; // BGRA, row-major
-        int x = 0; // top-left of captured region in HDC coordinates
-        int y = 0;
-        int width = 0;
-        int height = 0;
-        int pitch = 0; // bytes per row (= width * 4)
+    // What we gain over raw ClearType on OLED panels:
+    //
+    //   WOLED (RWBG/RGWB — LG panels):
+    //     ClearType treats pixels as an RGB stripe (R=left, G=centre, B=right).
+    //     WOLED has a WHITE subpixel (R, W, B, G — 4 per pixel). The W subpixel
+    //     drives R+G+B simultaneously via TCON hardware. ClearType does not model
+    //     this; we reconstruct the correct W contribution from the per-channel
+    //     coverages, eliminating the grey haze on dark backgrounds.
+    //
+    //   QD-OLED triangular (Samsung — Dell AW3423DW, Odyssey G8, etc.):
+    //     ClearType's filter is optimised for horizontal RGB stripe panels.
+    //     We re-apply the recovered coverages with per-channel blending without
+    //     the stripe-specific fringing correction, which better matches the
+    //     triangular layout where all three subpixels share vertical space.
+    //
+    //   Both panels benefit from the BT.709 luma anchoring, chromaKeep
+    //   calibration, and the S-curve readability boost.
+    // =========================================================================
 
-        [[nodiscard]] bool IsValid() const { return !data.empty() && width > 0 && height > 0; }
+    // -------------------------------------------------------------------------
+    // Pixel region capture
+    // -------------------------------------------------------------------------
+    struct PixelCapture
+    {
+        std::vector<uint8_t> data; // BGRA, row-major, top-down
+        int x = 0, y = 0, width = 0, height = 0, pitch = 0;
+
+        [[nodiscard]] bool IsValid() const
+        {
+            return !data.empty() && width > 0 && height > 0;
+        }
     };
 
-    // Capture a region of the HDC into a CPU-side BGRA buffer.
-    static BackgroundCapture CaptureBackground(HDC hdc, int x, int y, int w, int h)
+    static PixelCapture CaptureRegion(HDC hdc, int x, int y, int w, int h)
     {
-        BackgroundCapture cap;
+        PixelCapture cap;
         if (w <= 0 || h <= 0) return cap;
 
         BITMAPINFO bmi = {};
         bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
         bmi.bmiHeader.biWidth = w;
-        bmi.bmiHeader.biHeight = -h; // top-down
+        bmi.bmiHeader.biHeight = -h;
         bmi.bmiHeader.biPlanes = 1;
         bmi.bmiHeader.biBitCount = 32;
         bmi.bmiHeader.biCompression = BI_RGB;
@@ -346,7 +117,7 @@ namespace puretype::hooks
         cap.width = w;
         cap.height = h;
         cap.pitch = w * 4;
-        cap.data.resize(cap.pitch * h);
+        cap.data.resize(static_cast<size_t>(w * 4) * h);
         std::memcpy(cap.data.data(), dibBits, cap.data.size());
 
         SelectObject(memDC, old);
@@ -355,109 +126,374 @@ namespace puretype::hooks
         return cap;
     }
 
-    // Blend a single glyph bitmap onto the HDC using a pre-captured background.
-    // The background pixels are read from `bg` rather than from hdc, so glyphs
-    // rendered earlier in the same pass do not pollute the background sample.
-    static bool BlitGlyphWithCapturedBg(
-        HDC hdc, int glyphX, int glyphY,
-        const RGBABitmap& bitmap,
-        COLORREF textColor,
-        const BackgroundCapture& bg)
+    // -------------------------------------------------------------------------
+    // Compute the bounding rect to capture.
+    //
+    // Conservative: a few extra pixels are fine (only changed pixels get
+    // remapped). Missing pixels means missing OLED correction. +4 px margin.
+    // -------------------------------------------------------------------------
+    static RECT ComputeCaptureBounds(HDC hdc,
+                                     int x, int y,
+                                     UINT options,
+                                     const RECT* lprc,
+                                     LPCWSTR lpString,
+                                     UINT cbCount,
+                                     const INT* lpDx)
     {
-        if (bitmap.data.empty() || bitmap.width <= 0 || bitmap.height <= 0) return false;
-        if (!bg.IsValid()) return false;
+        constexpr int kMargin = 4;
+
+        if (lprc && (options & (ETO_OPAQUE | ETO_CLIPPED)))
+        {
+            return {
+                lprc->left - kMargin, lprc->top - kMargin,
+                lprc->right + kMargin, lprc->bottom + kMargin
+            };
+        }
+
+        TEXTMETRICW tm = {};
+        GetTextMetricsW(hdc, &tm);
+
+        int textW = 0;
+        if (lpDx)
+        {
+            const bool hasPDY = (options & ETO_PDY) != 0;
+            for (UINT i = 0; i < cbCount; ++i)
+                textW += hasPDY ? lpDx[i * 2] : lpDx[i];
+        }
+        else
+        {
+            SIZE sz = {};
+            if (options & ETO_GLYPH_INDEX)
+                GetTextExtentExPointI(hdc,
+                                      reinterpret_cast<LPWORD>(const_cast<LPWSTR>(lpString)),
+                                      static_cast<int>(cbCount), 0, nullptr, nullptr, &sz);
+            else
+                GetTextExtentExPointW(hdc, lpString,
+                                      static_cast<int>(cbCount), 0, nullptr, nullptr, &sz);
+            textW = sz.cx;
+        }
+
+        const UINT align = GetTextAlign(hdc);
+        int left = x;
+        if ((align & TA_CENTER) == TA_CENTER) left = x - textW / 2;
+        else if ((align & TA_RIGHT) == TA_RIGHT) left = x - textW;
+
+        int top;
+        if ((align & TA_BASELINE) == TA_BASELINE) top = y - tm.tmAscent;
+        else if ((align & TA_BOTTOM) == TA_BOTTOM) top = y - tm.tmHeight;
+        else top = y;
+
+        return {
+            left - kMargin, top - kMargin,
+            left + textW + kMargin, top + tm.tmHeight + kMargin
+        };
+    }
+
+    // -------------------------------------------------------------------------
+    // ForceSubpixelRender: RAII guard that temporarily replaces the font on
+    // the DC with a ClearType-quality copy of itself.
+    //
+    // Problem:
+    //   PureType's OLED remapping extracts per-channel R/G/B subpixel coverage
+    //   from the GDI output. This only works when GDI writes different values to
+    //   R, G, and B — i.e. when ClearType is active. With grayscale AA or no AA,
+    //   GDI writes R == G == B per pixel, giving us zero subpixel information.
+    //
+    // Solution:
+    //   Before calling GDI, clone the current LOGFONT with lfQuality forced to
+    //   CLEARTYPE_QUALITY and select the clone into the DC. GDI then renders with
+    //   full ClearType subpixel output regardless of the system AA setting. After
+    //   GDI returns and we have captured the pixels, the destructor restores the
+    //   original font and deletes the clone.
+    //
+    // Why this is safe:
+    //   - GDI still computes ALL layout (advance widths, bearings, clipping).
+    //     The LOGFONT face name, size, weight and style are identical — only
+    //     lfQuality changes. GDI uses the same glyph outlines and hinting; only
+    //     the AA compositing stage is different.
+    //   - Metrics (tmHeight, tmAscent, tmDescent, GetTextExtentPoint32) are
+    //     unaffected by lfQuality — they are the same for CT and grayscale fonts
+    //     of the same face/size. Qt, MFC, and other frameworks compute their
+    //     bounding boxes before our hook fires, so they never see the clone.
+    //   - The clone is scoped to one ExtTextOutW call. It is deleted immediately
+    //     after capture regardless of any error path.
+    //   - If CreateFontIndirectW fails (unlikely, but defensive), the guard no-ops
+    //     and leaves the original font in place — GDI renders normally without
+    //     OLED correction for that call.
+    // -------------------------------------------------------------------------
+    struct ForceSubpixelRender
+    {
+        HDC m_hdc = nullptr;
+        HFONT m_origFont = nullptr;
+        HFONT m_ctFont = nullptr;
+        bool m_active = false;
+
+        explicit ForceSubpixelRender(HDC hdc)
+        {
+            m_hdc = hdc;
+            HFONT origFont = static_cast<HFONT>(GetCurrentObject(hdc, OBJ_FONT));
+            if (!origFont) return;
+
+            LOGFONTW lf = {};
+            if (GetObjectW(origFont, sizeof(lf), &lf) == 0) return;
+
+            // Already ClearType — no work needed.
+            if (lf.lfQuality == CLEARTYPE_QUALITY ||
+                lf.lfQuality == CLEARTYPE_NATURAL_QUALITY)
+            {
+                m_active = true; // mark active so destructor is a no-op
+                return;
+            }
+
+            // Clone with ClearType quality.
+            lf.lfQuality = CLEARTYPE_QUALITY;
+            m_ctFont = CreateFontIndirectW(&lf);
+            if (!m_ctFont) return;
+
+            m_origFont = static_cast<HFONT>(SelectObject(hdc, m_ctFont));
+            m_active = true;
+        }
+
+        ~ForceSubpixelRender()
+        {
+            if (m_origFont && m_hdc)
+            {
+                SelectObject(m_hdc, m_origFont);
+            }
+            if (m_ctFont)
+            {
+                DeleteObject(m_ctFont);
+            }
+        }
+
+        // Returns true if GDI will produce ClearType output for this call.
+        [[nodiscard]] bool IsActive() const { return m_active; }
+
+        ForceSubpixelRender(const ForceSubpixelRender&) = delete;
+        ForceSubpixelRender& operator=(const ForceSubpixelRender&) = delete;
+    };
+
+    // -------------------------------------------------------------------------
+    // RemapToOLED
+    //
+    // Extracts per-channel ClearType subpixel coverage from the R/G/B delta
+    // between before (background) and after (GDI ClearType output), then
+    // re-blends using the target OLED panel's physical subpixel layout.
+    //
+    // Input contract: after was produced by GDI with ClearType active (either
+    // naturally or forced by ForceSubpixelRender above). R, G, B channels
+    // carry independent per-subpixel coverage values.
+    // -------------------------------------------------------------------------
+    static void RemapToOLED(HDC hdc,
+                            const PixelCapture& before,
+                            const PixelCapture& after,
+                            COLORREF textColor,
+                            const ConfigData& cfg)
+    {
+        if (!before.IsValid() || !after.IsValid()) return;
+        if (before.width != after.width || before.height != after.height) return;
+
+        const int w = before.width;
+        const int h = before.height;
 
         const float linTextR = sRGBToLinear(GetRValue(textColor));
         const float linTextG = sRGBToLinear(GetGValue(textColor));
         const float linTextB = sRGBToLinear(GetBValue(textColor));
 
+        const bool qdPanel = (cfg.panelType == PanelType::QD_OLED_TRIANGLE);
+        const bool rgwbPanel = (cfg.panelType == PanelType::RGWB);
+
+        // ToneMapper S-curve LUT -----------------------------------------------
+        const bool tinyText = (h <= 18);
+        const bool smallText = (h <= 24);
+        const float sizeBoost = std::clamp((24.0f - static_cast<float>(h)) / 24.0f, 0.0f, 1.0f);
+        const float expBase = (qdPanel ? 1.01f : 1.03f)
+            * (1.0f + (cfg.lumaContrastStrength - 1.0f) * 0.5f);
+        const float finalExp = expBase + (qdPanel ? 0.10f : 0.16f) * sizeBoost;
+        const float finalGain = (qdPanel ? 1.000f : 1.004f)
+            + (qdPanel ? 0.008f : 0.012f) * sizeBoost;
+
+        constexpr int LUT_SIZE = 1024;
+        float scurveLUT[LUT_SIZE];
+        for (int i = 0; i < LUT_SIZE; ++i)
+        {
+            float c = static_cast<float>(i) / (LUT_SIZE - 1);
+            c = 1.0f - std::pow(1.0f - c, finalExp);
+            if (c > 0.20f) c = std::min(1.0f, c * finalGain);
+            scurveLUT[i] = std::clamp(c, 0.0f, 1.0f);
+        }
+        auto scurve = [&](float v) -> float
+        {
+            return scurveLUT[static_cast<int>(
+                std::clamp(v, 0.0f, 1.0f) * (LUT_SIZE - 1) + 0.5f)];
+        };
+
+        // chromaKeep -----------------------------------------------------------
+        float chromaKeep;
+        if (tinyText) chromaKeep = qdPanel ? 0.70f : 0.72f;
+        else if (smallText) chromaKeep = qdPanel ? 0.75f : 0.77f;
+        else if (h <= 32) chromaKeep = qdPanel ? 0.80f : 0.82f;
+        else chromaKeep = qdPanel ? 0.83f : 0.85f;
+
+        // Output buffer --------------------------------------------------------
+        std::vector<uint8_t> output(static_cast<size_t>(before.pitch) * h);
+        bool anyModified = false;
+
+        for (int row = 0; row < h; ++row)
+        {
+            const uint8_t* bRow = before.data.data() + row * before.pitch;
+            const uint8_t* aRow = after.data.data() + row * after.pitch;
+            uint8_t* oRow = output.data() + row * before.pitch;
+
+            for (int col = 0; col < w; ++col)
+            {
+                const uint8_t* bp = bRow + col * 4; // BGRA
+                const uint8_t* ap = aRow + col * 4;
+
+                // Default: keep whatever GDI wrote (background or opaque fill).
+                oRow[col * 4 + 0] = ap[0];
+                oRow[col * 4 + 1] = ap[1];
+                oRow[col * 4 + 2] = ap[2];
+                oRow[col * 4 + 3] = 0xFF;
+
+                // Only process pixels where ClearType blended text.
+                if (ap[0] == bp[0] && ap[1] == bp[1] && ap[2] == bp[2]) continue;
+                anyModified = true;
+
+                // --- Step 1: background and ClearType output in linear light ---
+                const float bgB = sRGBToLinear(bp[0]);
+                const float bgG = sRGBToLinear(bp[1]);
+                const float bgR = sRGBToLinear(bp[2]);
+
+                const float ctB = sRGBToLinear(ap[0]);
+                const float ctG = sRGBToLinear(ap[1]);
+                const float ctR = sRGBToLinear(ap[2]);
+
+                // --- Step 2: extract per-channel subpixel coverage masks -------
+                // ClearType blends: ct_ch = bg*(1-m) + text*m  →  m = (ct-bg)/(text-bg)
+                auto extractMask = [](float ct, float bg, float text) -> float
+                {
+                    const float d = text - bg;
+                    if (std::abs(d) < 0.001f) return 0.0f;
+                    return std::clamp((ct - bg) / d, 0.0f, 1.0f);
+                };
+
+                const float maskR = extractMask(ctR, bgR, linTextR);
+                const float maskG = extractMask(ctG, bgG, linTextG);
+                const float maskB = extractMask(ctB, bgB, linTextB);
+
+                // --- Step 3: OLED channel reconstruction -----------------------
+                //
+                // ClearType subpixel centers (3 per pixel, RGB stripe):
+                //   R → 1/6  (0.167)   G → 3/6  (0.500)   B → 5/6  (0.833)
+                //
+                // WOLED RWBG subpixel centers (4 per pixel):
+                //   R → 1/8  (0.125)   W → 3/8  (0.375)   B → 5/8  (0.625)   G → 7/8 (0.875)
+                //
+                // WOLED RGWB subpixel centers (4 per pixel):
+                //   R → 1/8            G → 3/8              W → 5/8             B → 7/8
+                //
+                // QD-OLED (triangular, 3 per pixel):
+                //   Approximately same as RGB stripe horizontally; use directly.
+
+                float finalCovR, finalCovG, finalCovB;
+
+                if (qdPanel)
+                {
+                    // QD-OLED: reuse ClearType masks directly for horizontal coverage.
+                    finalCovR = maskR;
+                    finalCovG = maskG;
+                    finalCovB = maskB;
+                }
+                else if (rgwbPanel)
+                {
+                    // RGWB: order R(1/8), G(3/8), W(5/8), B(7/8)
+                    //   WOLED R ← CT_R   (1/8 ≈ 1/6)
+                    //   WOLED G ← CT_G   (3/8 ≈ 3/6, closest)
+                    //   WOLED W ← CT_B   (5/8 ≈ 5/6, closest) * (1-crossTalk)
+                    //   WOLED B ← CT_B   (7/8 ≈ 5/6, also closest)
+                    //   W drives all channels via TCON max().
+                    const float alpha_W = maskB * (1.0f - cfg.woledCrossTalkReduction);
+                    finalCovR = std::max(maskR, alpha_W);
+                    finalCovG = std::max(maskG, alpha_W);
+                    finalCovB = std::max(maskB, alpha_W);
+                }
+                else
+                {
+                    // RWBG (default): order R(1/8), W(3/8), B(5/8), G(7/8)
+                    //   WOLED R ← CT_R              (1/6 ≈ 1/8)
+                    //   WOLED W ← CT_G * (1-xTalk)  (3/6 ≈ 3/8)
+                    //   WOLED B ← avg(CT_G, CT_B)   (5/8 lies between CT_G and CT_B centers)
+                    //   WOLED G ← CT_B              (5/6 ≈ 7/8)
+                    //   W drives all channels via TCON max().
+                    const float alpha_R = maskR;
+                    const float alpha_W = maskG * (1.0f - cfg.woledCrossTalkReduction);
+                    const float alpha_B = (maskG + maskB) * 0.5f;
+                    const float alpha_G = maskB;
+                    finalCovR = std::max(alpha_R, alpha_W);
+                    finalCovG = std::max(alpha_G, alpha_W);
+                    finalCovB = std::max(alpha_B, alpha_W);
+                }
+
+                // --- Step 4: chromaKeep (BT.709 luma anchor) ------------------
+                const float yCov = 0.2126f * finalCovR
+                    + 0.7152f * finalCovG
+                    + 0.0722f * finalCovB;
+                finalCovR = yCov + (finalCovR - yCov) * chromaKeep;
+                finalCovG = yCov + (finalCovG - yCov) * chromaKeep;
+                finalCovB = yCov + (finalCovB - yCov) * chromaKeep;
+
+                // --- Step 5: S-curve readability boost ------------------------
+                finalCovR = scurve(finalCovR);
+                finalCovG = scurve(finalCovG);
+                finalCovB = scurve(finalCovB);
+
+                // --- Step 6: final per-channel blend  bg → textColor ----------
+                const float outR = bgR * (1.0f - finalCovR) + linTextR * finalCovR;
+                const float outG = bgG * (1.0f - finalCovG) + linTextG * finalCovG;
+                const float outB = bgB * (1.0f - finalCovB) + linTextB * finalCovB;
+
+                oRow[col * 4 + 0] = linearToSRGB(outB);
+                oRow[col * 4 + 1] = linearToSRGB(outG);
+                oRow[col * 4 + 2] = linearToSRGB(outR);
+                oRow[col * 4 + 3] = 0xFF;
+            }
+        }
+
+        if (!anyModified) return;
+
+        // Write remapped pixels back to the HDC.
         BITMAPINFO bmi = {};
         bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-        bmi.bmiHeader.biWidth = bitmap.width;
-        bmi.bmiHeader.biHeight = -bitmap.height;
+        bmi.bmiHeader.biWidth = w;
+        bmi.bmiHeader.biHeight = -h;
         bmi.bmiHeader.biPlanes = 1;
         bmi.bmiHeader.biBitCount = 32;
         bmi.bmiHeader.biCompression = BI_RGB;
 
         void* dibBits = nullptr;
         HDC memDC = CreateCompatibleDC(hdc);
-        if (!memDC) return false;
+        if (!memDC) return;
 
         HBITMAP hBitmap = CreateDIBSection(memDC, &bmi, DIB_RGB_COLORS, &dibBits, nullptr, 0);
         if (!hBitmap || !dibBits)
         {
             DeleteDC(memDC);
-            return false;
+            return;
         }
 
-        HGDIOBJ oldBitmap = SelectObject(memDC, hBitmap);
+        std::memcpy(dibBits, output.data(), output.size());
 
-        // read background from the PRE-CAPTURED copy, not from the live hdc.
-        // This prevents double-blending: glyphs already written to hdc in this pass
-        // will NOT pollute the background for subsequent glyphs.
-        BITMAP dibInfo = {};
-        GetObject(hBitmap, sizeof(dibInfo), &dibInfo);
-        const int dstPitch = dibInfo.bmWidthBytes;
-
-        auto* dst = static_cast<uint8_t*>(dibBits);
-
-        for (int row = 0; row < bitmap.height; ++row)
-        {
-            const uint8_t* srcRow = bitmap.data.data() + row * bitmap.pitch;
-            uint8_t* dstRow = dst + row * dstPitch;
-
-            for (int col = 0; col < bitmap.width; ++col)
-            {
-                const uint8_t* srcPx = srcRow + col * 4;
-                uint8_t* dstPx = dstRow + col * 4;
-
-                // Map this pixel back to the pre-captured background.
-                const int bgPixX = (glyphX + col) - bg.x;
-                const int bgPixY = (glyphY + row) - bg.y;
-
-                if (bgPixX < 0 || bgPixX >= bg.width ||
-                    bgPixY < 0 || bgPixY >= bg.height)
-                {
-                    // Outside captured region — fall back to black background.
-                    dstPx[0] = dstPx[1] = dstPx[2] = 0;
-                }
-                else
-                {
-                    const uint8_t* bgPx = bg.data.data() + bgPixY * bg.pitch + bgPixX * 4;
-                    dstPx[0] = bgPx[0];
-                    dstPx[1] = bgPx[1];
-                    dstPx[2] = bgPx[2];
-                }
-                dstPx[3] = 0xFF; // Preserve opacity for DWM-composited surfaces
-
-                if (srcPx[3] == 0) continue; // transparent pixel — keep bg
-
-                // Per-channel subpixel blend in linear light.
-                const float maskB = sRGBToLinear(srcPx[0]);
-                const float maskG = sRGBToLinear(srcPx[1]);
-                const float maskR = sRGBToLinear(srcPx[2]);
-
-                const float bgB = sRGBToLinear(dstPx[0]);
-                const float bgG = sRGBToLinear(dstPx[1]);
-                const float bgR = sRGBToLinear(dstPx[2]);
-
-                dstPx[0] = linearToSRGB(bgB * (1.0f - maskB) + linTextB * maskB);
-                dstPx[1] = linearToSRGB(bgG * (1.0f - maskG) + linTextG * maskG);
-                dstPx[2] = linearToSRGB(bgR * (1.0f - maskR) + linTextR * maskR);
-                dstPx[3] = 0xFF;
-            }
-        }
-
-        const BOOL blitResult = BitBlt(hdc, glyphX, glyphY,
-                                       bitmap.width, bitmap.height,
-                                       memDC, 0, 0, SRCCOPY);
-
-        SelectObject(memDC, oldBitmap);
+        HGDIOBJ old = SelectObject(memDC, hBitmap);
+        BitBlt(hdc, before.x, before.y, w, h, memDC, 0, 0, SRCCOPY);
+        SelectObject(memDC, old);
         DeleteObject(hBitmap);
         DeleteDC(memDC);
-        return blitResult != FALSE;
     }
 
+    // -------------------------------------------------------------------------
+    // Hook
+    // -------------------------------------------------------------------------
     static thread_local bool g_insideHook = false;
 
     struct HookRefGuard
@@ -469,299 +505,91 @@ namespace puretype::hooks
     };
 
     static BOOL WINAPI Hooked_ExtTextOutW(
-        HDC hdc,
-        int x,
-        int y,
-        UINT options,
-        const RECT* lprc,
-        LPCWSTR lpString,
-        UINT cbCount,
-        const INT* lpDx)
+        HDC hdc, int x, int y, UINT options,
+        const RECT* lprc, LPCWSTR lpString, UINT cbCount, const INT* lpDx)
     {
+        // Re-entrancy guard: prevents processing our own BitBlt calls.
         if (g_insideHook)
             return g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
+
+        // Skip empty calls (opaque background fill with no text).
         if (!lpString || cbCount == 0)
             return g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
-
-        // Dynamic Qt window detection.
-        //
-        // Qt pre-computes layout metrics using its own FreeType build before
-        // calling ExtTextOutW. The DC is associated with a Qt window whose
-        // layout engine owns the glyph bounding boxes. If we replace the bitmap
-        // with one at 1/3 the expected width, Qt clips it to the reserved
-        // bounding box and the text becomes illegible.
-        //
-        // IsQtWindow() detects both Qt5 and Qt6 window classes, including
-        // root-ancestor promotion for child widget DCs.
-        if (IsQtWindow(hdc))
-            return g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
-
-        HookRefGuard refGuard;
 
         const auto& cfg = Config::Instance().Data();
         if (cfg.filterStrength <= 0.0f)
             return g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
 
-        std::string fontPath = GetFontPathFromHDC(hdc);
-        if (fontPath.empty())
-            return g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
-
-        uint32_t pixelSize = GetFontPixelSize(hdc);
-        if (pixelSize == 0 || pixelSize > 200)
-            return g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
-
-        const bool isGlyphIndex = (options & ETO_GLYPH_INDEX) != 0;
-        auto glyphIndices = TextToGlyphIndices(hdc, lpString, cbCount, isGlyphIndex);
-        if (glyphIndices.empty())
-            return g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
-
-        // ETO_PDY: interleaved [dx0,dy0, dx1,dy1, ...] — extract X only.
-        const bool hasPDY = (options & ETO_PDY) != 0;
-        std::vector<int> cleanDx;
-        const int* effectiveDx = lpDx;
-        if (lpDx && hasPDY)
-        {
-            cleanDx.resize(cbCount);
-            for (UINT i = 0; i < cbCount; ++i) cleanDx[i] = lpDx[i * 2];
-            effectiveDx = cleanDx.data();
-        }
-
-        auto positionedGlyphs = FTRasterizer::Instance().RasterizeGlyphRun(
-            fontPath, glyphIndices.data(),
-            static_cast<uint32_t>(glyphIndices.size()), pixelSize, effectiveDx);
-
-        if (positionedGlyphs.size() != glyphIndices.size())
-            return g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
-
-        for (const auto& pg : positionedGlyphs)
-        {
-            if (!pg.bitmap || pg.bitmap->width < 0 || pg.bitmap->height < 0)
-                return g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
-        }
-
+        HookRefGuard refGuard;
         g_insideHook = true;
 
-        auto filter = SubpixelFilter::Create(static_cast<int>(cfg.panelType));
-        const COLORREF textColor = GetTextColor(hdc);
+        // Step 1 — compute capture region.
+        RECT bounds = ComputeCaptureBounds(hdc, x, y, options, lprc,
+                                           lpString, cbCount, lpDx);
 
-        std::vector<RGBABitmap> filteredBitmaps;
-        filteredBitmaps.reserve(positionedGlyphs.size());
-
-        for (auto& pg : positionedGlyphs)
+        // Clamp to DC clip box.
+        RECT clipBox = {};
+        if (GetClipBox(hdc, &clipBox) != ERROR)
         {
-            if (!pg.bitmap || pg.bitmap->width <= 0 || pg.bitmap->height <= 0 ||
-                pg.bitmap->data.empty())
-            {
-                filteredBitmaps.push_back(RGBABitmap{});
-                continue;
-            }
-
-            RGBABitmap filtered = filter->Apply(*pg.bitmap, cfg);
-            if (filtered.data.empty() || filtered.width <= 0 || filtered.height <= 0)
-            {
-                g_insideHook = false;
-                return g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
-            }
-
-            if (cfg.highlightRenderedGlyphs)
-            {
-                for (size_t i = 0; i < filtered.data.size(); i += 4)
-                {
-                    filtered.data[i + 0] = static_cast<uint8_t>(filtered.data[i + 0] * 0.7f + 200 * 0.3f);
-                    filtered.data[i + 1] = static_cast<uint8_t>(filtered.data[i + 1] * 0.7f + 200 * 0.3f);
-                }
-            }
-
-            filteredBitmaps.push_back(std::move(filtered));
+            bounds.left = std::max(bounds.left, clipBox.left);
+            bounds.top = std::max(bounds.top, clipBox.top);
+            bounds.right = std::min(bounds.right, clipBox.right);
+            bounds.bottom = std::min(bounds.bottom, clipBox.bottom);
         }
 
-        // ---------------------------------------------------------------
-        // Text alignment & start position
-        // ---------------------------------------------------------------
-        const UINT align = GetTextAlign(hdc);
-        int startX = x;
-        int startY = y;
+        const int captureW = bounds.right - bounds.left;
+        const int captureH = bounds.bottom - bounds.top;
 
-        if (align & TA_UPDATECP)
+        if (captureW <= 0 || captureH <= 0)
         {
-            POINT pt;
-            GetCurrentPositionEx(hdc, &pt);
-            startX = pt.x;
-            startY = pt.y;
-        }
-
-        int totalWidth = 0;
-        if (effectiveDx)
-        {
-            for (UINT i = 0; i < cbCount; ++i) totalWidth += effectiveDx[i];
-        }
-        else
-        {
-            for (const auto& pg : positionedGlyphs)
-                if (pg.bitmap) totalWidth += pg.bitmap->advanceX / 3;
-        }
-
-        if (totalWidth <= 0 && !positionedGlyphs.empty())
-        {
-            const auto& last = positionedGlyphs.back();
-            if (last.bitmap)
-                totalWidth = (last.offsetX + last.bitmap->advanceX) / 3;
-        }
-
-        if ((align & TA_CENTER) == TA_CENTER) startX -= totalWidth / 2;
-        else if ((align & TA_RIGHT) == TA_RIGHT) startX -= totalWidth;
-
-        TEXTMETRICW tm;
-        GetTextMetricsW(hdc, &tm);
-        if ((align & TA_BOTTOM) == TA_BOTTOM) startY -= tm.tmDescent;
-        else if (((align & TA_BASELINE) != TA_BASELINE) && ((align & TA_BOTTOM) != TA_BOTTOM))
-            startY += tm.tmAscent;
-
-        // ---------------------------------------------------------------
-        // Background fill (ETO_OPAQUE or OPAQUE mode)
-        // ---------------------------------------------------------------
-        if (lprc && (options & ETO_OPAQUE))
-        {
-            HBRUSH hBrush = CreateSolidBrush(GetBkColor(hdc));
-            FillRect(hdc, lprc, hBrush);
-            DeleteObject(hBrush);
-        }
-        else if (GetBkMode(hdc) == OPAQUE)
-        {
-            RECT bgRect = {
-                startX, startY - tm.tmAscent,
-                startX + totalWidth, startY + tm.tmDescent
-            };
-            HBRUSH hBrush = CreateSolidBrush(GetBkColor(hdc));
-            FillRect(hdc, &bgRect, hBrush);
-            DeleteObject(hBrush);
-        }
-
-        // ---------------------------------------------------------------
-        // CRITICAL FIX — Pre-capture the background ONCE for the entire run.
-        // ---------------------------------------------------------------
-
-        int runLeft = INT_MAX, runRight = INT_MIN;
-        int runTop = INT_MAX, runBottom = INT_MIN;
-
-        for (size_t i = 0; i < positionedGlyphs.size(); ++i)
-        {
-            const auto& pg = positionedGlyphs[i];
-            const auto& fb = filteredBitmaps[i];
-            if (!pg.bitmap || fb.data.empty()) continue;
-
-            const int padPx = pg.bitmap->padLeft / 3;
-            const int gx = startX
-                + static_cast<int>(std::floor(static_cast<float>(pg.offsetX) / 3.0f))
-                - padPx;
-            const int gy = startY - pg.bitmap->bearingY - pg.bitmap->padTop;
-
-            runLeft = std::min(runLeft, gx);
-            runRight = std::max(runRight, gx + fb.width);
-            runTop = std::min(runTop, gy);
-            runBottom = std::max(runBottom, gy + fb.height);
-        }
-
-        BackgroundCapture bgCapture;
-        if (runLeft < runRight && runTop < runBottom)
-        {
-            bgCapture = CaptureBackground(hdc, runLeft, runTop,
-                                          runRight - runLeft, runBottom - runTop);
-        }
-
-        // ---------------------------------------------------------------
-        // Clip region for ETO_CLIPPED
-        // ---------------------------------------------------------------
-        HRGN hOldRgn = nullptr;
-        HRGN hClipRgn = nullptr;
-        if (lprc && (options & ETO_CLIPPED))
-        {
-            hClipRgn = CreateRectRgnIndirect(lprc);
-            if (hClipRgn)
-            {
-                hOldRgn = CreateRectRgn(0, 0, 0, 0);
-                if (GetClipRgn(hdc, hOldRgn) <= 0)
-                {
-                    DeleteObject(hOldRgn);
-                    hOldRgn = nullptr;
-                }
-                ExtSelectClipRgn(hdc, hClipRgn, RGN_AND);
-            }
-        }
-
-        // ---------------------------------------------------------------
-        // Render glyphs using the frozen background capture
-        // ---------------------------------------------------------------
-        bool fallbackNeeded = false;
-        for (size_t i = 0; i < positionedGlyphs.size(); ++i)
-        {
-            const auto& pg = positionedGlyphs[i];
-            const auto& filtered = filteredBitmaps[i];
-
-            if (!pg.bitmap || filtered.data.empty() ||
-                filtered.width <= 0 || filtered.height <= 0)
-                continue;
-
-            const int padPx = pg.bitmap->padLeft / 3;
-            const int glyphX = startX
-                + static_cast<int>(std::floor(static_cast<float>(pg.offsetX) / 3.0f))
-                - padPx;
-            const int glyphY = startY - pg.bitmap->bearingY - pg.bitmap->padTop;
-
-            if (lprc && (options & ETO_CLIPPED))
-            {
-                if (glyphX >= lprc->right || glyphX + filtered.width <= lprc->left ||
-                    glyphY >= lprc->bottom || glyphY + filtered.height <= lprc->top)
-                    continue;
-            }
-
-            bool blitOk;
-            if (bgCapture.IsValid())
-            {
-                blitOk = BlitGlyphWithCapturedBg(hdc, glyphX, glyphY,
-                                                 filtered, textColor, bgCapture);
-            }
-            else
-            {
-                blitOk = Blender::Instance().BlitToHDC(
-                    hdc, glyphX, glyphY, filtered, textColor, cfg.gamma);
-            }
-
-            if (!blitOk)
-            {
-                fallbackNeeded = true;
-                break;
-            }
-        }
-
-        // Restore clip region (always).
-        if (hClipRgn)
-        {
-            SelectClipRgn(hdc, hOldRgn);
-            if (hOldRgn) DeleteObject(hOldRgn);
-            DeleteObject(hClipRgn);
-        }
-
-        if (!fallbackNeeded && (align & TA_UPDATECP))
-            MoveToEx(hdc, startX + totalWidth, startY, nullptr);
-
-        g_insideHook = false;
-
-        if (fallbackNeeded)
+            g_insideHook = false;
             return g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
-
-        // GDI dirty-rect / DWM shadow buffer: run with empty clip so DWM
-        // registers the bounding box without drawing stock ClearType.
-        {
-            const int savedDC = SaveDC(hdc);
-            HRGN emptyRgn = CreateRectRgn(0, 0, 0, 0);
-            ExtSelectClipRgn(hdc, emptyRgn, RGN_COPY);
-            g_OrigExtTextOutW(hdc, x, y, options & ~ETO_OPAQUE, lprc, lpString, cbCount, lpDx);
-            RestoreDC(hdc, savedDC);
-            DeleteObject(emptyRgn);
         }
 
-        return TRUE;
+        // Step 2 — capture BEFORE.
+        PixelCapture before = CaptureRegion(hdc, bounds.left, bounds.top,
+                                            captureW, captureH);
+        if (!before.IsValid())
+        {
+            g_insideHook = false;
+            return g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
+        }
+
+        // Step 3 — force ClearType on the DC for this call, then let GDI render.
+        //
+        // ForceSubpixelRender temporarily replaces the font on the DC with a
+        // ClearType-quality clone of itself. This ensures GDI always produces
+        // per-channel R/G/B subpixel output — regardless of whether the user has
+        // ClearType enabled system-wide or whether the app requested grayscale AA.
+        //
+        // The clone has the SAME face name, size, weight and style as the original;
+        // only lfQuality changes. GDI metrics (advance widths, bearings, text
+        // extent) are identical for both qualities, so Qt/MFC/WPF bounding boxes
+        // computed before this hook fired remain valid.
+        //
+        // The RAII destructor restores the original font and deletes the clone
+        // before this function returns, on every code path.
+        {
+            ForceSubpixelRender ctGuard(hdc);
+
+            BOOL result = g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
+
+            // Step 4 — capture AFTER (ClearType subpixel data now present).
+            PixelCapture after = CaptureRegion(hdc, bounds.left, bounds.top,
+                                               captureW, captureH);
+
+            // ctGuard destructor fires here — original font is back on the DC
+            // before we write any pixels, so subsequent GDI calls are unaffected.
+
+            if (after.IsValid())
+            {
+                const COLORREF textColor = GetTextColor(hdc);
+                RemapToOLED(hdc, before, after, textColor, cfg);
+            }
+
+            g_insideHook = false;
+            return result;
+        }
     }
 
     static BOOL WINAPI Hooked_PolyTextOutW(HDC hdc, const POLYTEXTW* ppt, int cStrings)
@@ -779,16 +607,18 @@ namespace puretype::hooks
         return success;
     }
 
-    static int WINAPI Hooked_DrawTextW(HDC hdc, LPCWSTR lpchText, int cchText,
-                                       LPRECT lprc, UINT format)
+    // DrawTextW / DrawTextExW delegate to GDI which calls ExtTextOutW internally.
+    // Intercepting both layers would cause double-processing — pass through.
+    static int WINAPI Hooked_DrawTextW(HDC hdc, LPCWSTR text, int len,
+                                       LPRECT lprc, UINT fmt)
     {
-        return g_OrigDrawTextW(hdc, lpchText, cchText, lprc, format);
+        return g_OrigDrawTextW(hdc, text, len, lprc, fmt);
     }
 
-    static int WINAPI Hooked_DrawTextExW(HDC hdc, LPWSTR lpchText, int cchText,
-                                         LPRECT lprc, UINT format, LPDRAWTEXTPARAMS lpdtp)
+    static int WINAPI Hooked_DrawTextExW(HDC hdc, LPWSTR text, int len,
+                                         LPRECT lprc, UINT fmt, LPDRAWTEXTPARAMS p)
     {
-        return g_OrigDrawTextExW(hdc, lpchText, cchText, lprc, format, lpdtp);
+        return g_OrigDrawTextExW(hdc, text, len, lprc, fmt, p);
     }
 
     bool InstallGDIHooks()
@@ -797,67 +627,45 @@ namespace puretype::hooks
 
         HMODULE hGdi32 = GetModuleHandleW(L"gdi32.dll");
         if (!hGdi32) hGdi32 = LoadLibraryW(L"gdi32.dll");
-
         if (hGdi32)
         {
-            auto pExtTextOutW = reinterpret_cast<ExtTextOutW_t>(
-                GetProcAddress(hGdi32, "ExtTextOutW"));
-            if (pExtTextOutW)
+            if (auto p = reinterpret_cast<ExtTextOutW_t>(GetProcAddress(hGdi32, "ExtTextOutW")))
             {
-                MH_STATUS status = MH_CreateHook(
-                    reinterpret_cast<LPVOID>(pExtTextOutW),
-                    reinterpret_cast<LPVOID>(&Hooked_ExtTextOutW),
-                    reinterpret_cast<LPVOID*>(&g_OrigExtTextOutW));
-                if (status != MH_OK)
+                if (MH_CreateHook(reinterpret_cast<LPVOID>(p),
+                                  reinterpret_cast<LPVOID>(&Hooked_ExtTextOutW),
+                                  reinterpret_cast<LPVOID*>(&g_OrigExtTextOutW)) != MH_OK)
                 {
-                    PureTypeLog("MH_CreateHook(ExtTextOutW) failed: %s", MH_StatusToString(status));
+                    PureTypeLog("MH_CreateHook(ExtTextOutW) failed");
                     success = false;
                 }
             }
             else
             {
-                PureTypeLog("ExtTextOutW not found in gdi32.dll");
+                PureTypeLog("ExtTextOutW not found");
                 success = false;
             }
 
-            auto pPolyTextOutW = reinterpret_cast<PolyTextOutW_t>(
-                GetProcAddress(hGdi32, "PolyTextOutW"));
-            if (pPolyTextOutW)
+            if (auto p = reinterpret_cast<PolyTextOutW_t>(GetProcAddress(hGdi32, "PolyTextOutW")))
             {
-                MH_STATUS status = MH_CreateHook(
-                    reinterpret_cast<LPVOID>(pPolyTextOutW),
-                    reinterpret_cast<LPVOID>(&Hooked_PolyTextOutW),
-                    reinterpret_cast<LPVOID*>(&g_OrigPolyTextOutW));
-                if (status != MH_OK) success = false;
+                MH_CreateHook(reinterpret_cast<LPVOID>(p),
+                              reinterpret_cast<LPVOID>(&Hooked_PolyTextOutW),
+                              reinterpret_cast<LPVOID*>(&g_OrigPolyTextOutW));
             }
         }
 
         HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
         if (!hUser32) hUser32 = LoadLibraryW(L"user32.dll");
-
         if (hUser32)
         {
-            auto pDrawTextW = reinterpret_cast<DrawTextW_t>(
-                GetProcAddress(hUser32, "DrawTextW"));
-            if (pDrawTextW)
-            {
-                MH_STATUS status = MH_CreateHook(
-                    reinterpret_cast<LPVOID>(pDrawTextW),
-                    reinterpret_cast<LPVOID>(&Hooked_DrawTextW),
-                    reinterpret_cast<LPVOID*>(&g_OrigDrawTextW));
-                if (status != MH_OK) success = false;
-            }
+            if (auto p = reinterpret_cast<DrawTextW_t>(GetProcAddress(hUser32, "DrawTextW")))
+                MH_CreateHook(reinterpret_cast<LPVOID>(p),
+                              reinterpret_cast<LPVOID>(&Hooked_DrawTextW),
+                              reinterpret_cast<LPVOID*>(&g_OrigDrawTextW));
 
-            auto pDrawTextExW = reinterpret_cast<DrawTextExW_t>(
-                GetProcAddress(hUser32, "DrawTextExW"));
-            if (pDrawTextExW)
-            {
-                MH_STATUS status = MH_CreateHook(
-                    reinterpret_cast<LPVOID>(pDrawTextExW),
-                    reinterpret_cast<LPVOID>(&Hooked_DrawTextExW),
-                    reinterpret_cast<LPVOID*>(&g_OrigDrawTextExW));
-                if (status != MH_OK) success = false;
-            }
+            if (auto p = reinterpret_cast<DrawTextExW_t>(GetProcAddress(hUser32, "DrawTextExW")))
+                MH_CreateHook(reinterpret_cast<LPVOID>(p),
+                              reinterpret_cast<LPVOID>(&Hooked_DrawTextExW),
+                              reinterpret_cast<LPVOID*>(&g_OrigDrawTextExW));
         }
 
         return success;
@@ -869,30 +677,29 @@ namespace puretype::hooks
         {
             if (g_OrigExtTextOutW)
             {
-                auto p = reinterpret_cast<LPVOID>(GetProcAddress(hGdi32, "ExtTextOutW"));
-                if (p) MH_RemoveHook(p);
+                if (auto p = reinterpret_cast<LPVOID>(GetProcAddress(hGdi32, "ExtTextOutW")))
+                    MH_RemoveHook(p);
                 g_OrigExtTextOutW = nullptr;
             }
             if (g_OrigPolyTextOutW)
             {
-                auto p = reinterpret_cast<LPVOID>(GetProcAddress(hGdi32, "PolyTextOutW"));
-                if (p) MH_RemoveHook(p);
+                if (auto p = reinterpret_cast<LPVOID>(GetProcAddress(hGdi32, "PolyTextOutW")))
+                    MH_RemoveHook(p);
                 g_OrigPolyTextOutW = nullptr;
             }
         }
-
         if (const HMODULE hUser32 = GetModuleHandleW(L"user32.dll"))
         {
             if (g_OrigDrawTextW)
             {
-                auto p = reinterpret_cast<LPVOID>(GetProcAddress(hUser32, "DrawTextW"));
-                if (p) MH_RemoveHook(p);
+                if (auto p = reinterpret_cast<LPVOID>(GetProcAddress(hUser32, "DrawTextW")))
+                    MH_RemoveHook(p);
                 g_OrigDrawTextW = nullptr;
             }
             if (g_OrigDrawTextExW)
             {
-                auto p = reinterpret_cast<LPVOID>(GetProcAddress(hUser32, "DrawTextExW"));
-                if (p) MH_RemoveHook(p);
+                if (auto p = reinterpret_cast<LPVOID>(GetProcAddress(hUser32, "DrawTextExW")))
+                    MH_RemoveHook(p);
                 g_OrigDrawTextExW = nullptr;
             }
         }
