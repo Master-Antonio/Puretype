@@ -23,11 +23,16 @@ static const wchar_t* const kWindowClass = L"PureTypeTrayWindow";
 static const wchar_t* const kWindowTitle = L"PureType";
 static const UINT WM_TRAYICON = WM_APP + 1;
 
+// Sent by PuretypeUI after saving the INI — tray reloads the hook immediately.
+// PuretypeUI finds the tray window via FindWindow(kWindowClass, kWindowTitle).
+static const UINT WM_PURETYPE_RELOAD = WM_APP + 2;
+
 static const UINT IDM_ENABLE = 1001;
 static const UINT IDM_DISABLE = 1002;
 static const UINT IDM_PANEL_QDOLED = 1010;
 static const UINT IDM_PANEL_RWBG = 1011;
 static const UINT IDM_PANEL_RGWB = 1012;
+static const UINT IDM_SETTINGS = 1005;
 static const UINT IDM_EXIT = 1099;
 
 static HINSTANCE g_hInstance = nullptr;
@@ -381,6 +386,8 @@ static void ShowTrayMenu(HWND hWnd)
                 L"Panel Type");
 
     AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(hMenu, MF_STRING, IDM_SETTINGS, L"Settings / UI");
+    AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(hMenu, MF_STRING, IDM_EXIT, L"Exit");
 
     SetForegroundWindow(hWnd);
@@ -395,14 +402,71 @@ static void ShowTrayMenu(HWND hWnd)
     DestroyMenu(hMenu);
 }
 
+// Mutex name must match App.xaml.cs in PuretypeUI
+static constexpr wchar_t kUIMutex[] = L"PureTypeUI_Instance";
+
+static void LaunchSettingsUI(HWND hWnd)
+{
+    // If already running, bring it to front instead of spawning a second instance.
+    HANDLE hMutex = OpenMutexW(SYNCHRONIZE, FALSE, kUIMutex);
+    if (hMutex)
+    {
+        CloseHandle(hMutex);
+        HWND hUI = FindWindowW(nullptr, L"Puretype");
+        if (!hUI) hUI = FindWindowW(nullptr, L"Puretype Configuration");
+        if (hUI)
+        {
+            if (IsIconic(hUI)) ShowWindow(hUI, SW_RESTORE);
+            SetForegroundWindow(hUI);
+        }
+        return;
+    }
+
+    std::wstring exeDir = GetExeDir();
+    std::wstring uiPath = exeDir + L"PuretypeUI.exe";
+
+    STARTUPINFOW si = {};
+    si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+
+    if (!CreateProcessW(uiPath.c_str(), nullptr, nullptr, nullptr,
+                        FALSE, 0, nullptr, exeDir.c_str(), &si, &pi))
+    {
+        wchar_t msg[256];
+        StringCchPrintfW(msg, 256,
+                         L"Failed to launch PuretypeUI.exe (Error %lu).\nPath: %s",
+                         GetLastError(), uiPath.c_str());
+        MessageBoxW(hWnd, msg, L"PureType Error", MB_OK | MB_ICONERROR);
+        return;
+    }
+
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+}
+
 static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 {
     switch (msg)
     {
+    case WM_PURETYPE_RELOAD:
+        // Re-read INI and restart hook so new processes get the updated config.
+        // Already-running processes need to be closed and reopened.
+        if (g_hookActive)
+        {
+            DisableHook();
+            EnableHook();
+        }
+        LoadPanelTypeFromIni();
+        return 0;
+
     case WM_TRAYICON:
         if (LOWORD(lParam) == WM_RBUTTONUP || LOWORD(lParam) == WM_CONTEXTMENU)
         {
             ShowTrayMenu(hWnd);
+        }
+        else if (LOWORD(lParam) == WM_LBUTTONDBLCLK)
+        {
+            LaunchSettingsUI(hWnd);
         }
         return 0;
 
@@ -438,6 +502,9 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 DisableHook();
                 EnableHook();
             }
+            break;
+        case IDM_SETTINGS:
+            LaunchSettingsUI(hWnd);
             break;
         case IDM_EXIT:
             DisableHook();

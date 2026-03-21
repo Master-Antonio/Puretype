@@ -36,6 +36,7 @@ add_library(PureType SHARED
         src/output/blender.cpp
         src/hooks/dwrite_hooks.cpp
         src/hooks/gdi_hooks.cpp
+        src/ui/preview_bridge.cpp
 )
 
 target_include_directories(PureType PRIVATE
@@ -63,7 +64,7 @@ target_compile_definitions(PureType PRIVATE
 
 target_compile_options(PureType PRIVATE /W4 /WX-)
 
-# ── Main Executable (System Tray Application with Icon) ──────────────────────
+# ── Main Executable (Injector / Launcher) ───────────────────────────────────
 add_executable(puretype_exe WIN32
         tools/injector.cpp
         src/puretype.rc
@@ -82,6 +83,25 @@ target_link_libraries(puretype_exe PRIVATE
         shell32.lib
         advapi32.lib
 )
+
+# ── WPF UI Build (C#) ───────────────────────────────────────────────────────
+find_program(DOTNET_EXE dotnet)
+if (DOTNET_EXE)
+    add_custom_target(PuretypeUI ALL
+            COMMAND ${DOTNET_EXE} build ${CMAKE_CURRENT_SOURCE_DIR}/PuretypeUI/PuretypeUI.csproj -c $<CONFIG>
+            COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_CURRENT_SOURCE_DIR}/PuretypeUI/bin/$<CONFIG>/net9.0-windows/win-x64/PuretypeUI.exe
+            $<TARGET_FILE_DIR:PureType>/PuretypeUI.exe
+            COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_CURRENT_SOURCE_DIR}/PuretypeUI/bin/$<CONFIG>/net9.0-windows/win-x64/PuretypeUI.dll
+            $<TARGET_FILE_DIR:PureType>/PuretypeUI.dll
+            COMMAND ${CMAKE_COMMAND} -E copy
+            ${CMAKE_CURRENT_SOURCE_DIR}/PuretypeUI/bin/$<CONFIG>/net9.0-windows/win-x64/PuretypeUI.runtimeconfig.json
+            $<TARGET_FILE_DIR:PureType>/PuretypeUI.runtimeconfig.json
+            COMMENT "Building WPF UI..."
+    )
+    add_dependencies(PuretypeUI PureType)
+endif ()
 
 # --- Operazioni Post-Build ---
 add_custom_command(TARGET PureType POST_BUILD

@@ -34,92 +34,21 @@ namespace
         }
     }
 
-    const wchar_t* const kBlacklist[] = {
-        // --- Windows core / system processes ---
-        // These processes must never be hooked: injecting into them causes
-        // boot failures, session crashes, or security product false positives.
-        L"csrss.exe",
-        L"smss.exe",
-        L"lsass.exe",
-        L"winlogon.exe",
-        L"services.exe",
-        L"svchost.exe",
-        L"dwm.exe",
-        L"wininit.exe",
-        L"fontdrvhost.exe",
-        L"sihost.exe",
-        L"RuntimeBroker.exe",
-        L"SearchHost.exe",
-        L"StartMenuExperienceHost.exe",
-        L"ShellExperienceHost.exe",
-        L"conhost.exe",
-        L"taskhostw.exe",
-        L"dasHost.exe",
-        L"WmiPrvSE.exe",
-        L"dllhost.exe",
-        L"audiodg.exe",
-        L"spoolsv.exe",
-        L"SecurityHealthService.exe",
-        L"MsMpEng.exe",
-
-        // --- Anti-cheat / game security ---
-        // These processes run their own kernel-level integrity checks.
-        // Hooking their DWrite/GDI calls will trigger detections and bans.
-        L"vgc.exe",
-        L"vgtray.exe",
-        L"EasyAntiCheat.exe",
-        L"EasyAntiCheat_EOS.exe",
-        L"BEService.exe",
-        L"BEDaisy.exe",
-        L"GameGuard.exe",
-        L"nProtect.exe",
-        L"PnkBstrA.exe",
-        L"PnkBstrB.exe",
-        L"faceit.exe",
-        L"FACEIT_AC.exe",
-
-        // --- Games (anti-cheat / VAC / EAC protected) ---
-        L"csgo.exe",
-        L"cs2.exe",
-        L"valorant.exe",
-        L"VALORANT-Win64-Shipping.exe",
-        L"r5apex.exe",
-        L"FortniteClient-Win64-Shipping.exe",
-        L"eldenring.exe",
-        L"GTA5.exe",
-        L"RDR2.exe",
-        L"OverwatchLauncher.exe",
-        L"RainbowSix.exe",
-        L"destiny2.exe",
-        L"Tarkov.exe",
-
-        // --- Browsers (Chromium/Gecko sandboxing) ---
-        // These processes use the Chromium sandbox which restricts DLL injection.
-        // Hooking them causes renderer crashes and GPU process failures.
-        L"chrome.exe",
-        L"msedge.exe",
-        L"firefox.exe",
-        L"opera.exe",
-        L"brave.exe",
-        L"vivaldi.exe",
-
-        nullptr
-    };
 
     bool IsProcessBlacklisted()
     {
-        wchar_t exePath[MAX_PATH] = {};
-        GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+        char exePathA[MAX_PATH] = {};
+        GetModuleFileNameA(nullptr, exePathA, MAX_PATH);
 
-        const wchar_t* exeName = exePath;
-        for (const wchar_t* p = exePath; *p; ++p)
+        const char* exeName = exePathA;
+        for (const char* p = exePathA; *p; ++p)
         {
-            if (*p == L'\\' || *p == L'/') exeName = p + 1;
+            if (*p == '\\' || *p == '/') exeName = p + 1;
         }
 
-        for (int i = 0; kBlacklist[i] != nullptr; ++i)
+        for (const auto& item : puretype::Config::Instance().Data().blacklist)
         {
-            if (_wcsicmp(exeName, kBlacklist[i]) == 0)
+            if (_stricmp(exeName, item.c_str()) == 0)
             {
                 return true;
             }
@@ -163,17 +92,17 @@ BOOL APIENTRY DllMain(const HMODULE hModule, const DWORD reason, LPVOID)
     {
     case DLL_PROCESS_ATTACH:
         {
-            if (IsProcessBlacklisted())
-            {
-                return FALSE;
-            }
-
             DisableThreadLibraryCalls(hModule);
             g_hSelfModule = hModule;
 
             std::string dllDir = GetDllDirectory(hModule);
             std::string iniPath = dllDir + "puretype.ini";
             puretype::Config::Instance().LoadFromFile(iniPath);
+
+            if (IsProcessBlacklisted())
+            {
+                return FALSE;
+            }
 
             puretype::initColorMathLUTs();
 

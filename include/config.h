@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace puretype
 {
@@ -29,6 +30,8 @@ namespace puretype
         bool debugEnabled = false;
         std::string logFile = "puretype.log";
         bool highlightRenderedGlyphs = false;
+
+        std::vector<std::string> blacklist;
     };
 
     class Config

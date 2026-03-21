@@ -191,6 +191,17 @@ namespace puretype
         return face;
     }
 
+    uint32_t FTRasterizer::GetGlyphIndex(const std::string& fontPath, uint32_t charCode)
+    {
+        std::lock_guard lock(m_mutex);
+        if (!m_ftLibrary) return 0;
+
+        FT_Face face = GetOrLoadFace(fontPath);
+        if (!face) return 0;
+
+        return FT_Get_Char_Index(face, charCode);
+    }
+
     const GlyphBitmap* FTRasterizer::RasterizeGlyph(
         const std::string& fontPath,
         uint32_t glyphIndex,

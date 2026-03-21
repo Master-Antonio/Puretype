@@ -1,0 +1,908 @@
+<Window x:Class="PuretypeUI.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Puretype" Height="640" Width="1000"
+        Background="Transparent" Foreground="White"
+        WindowStyle="None" AllowsTransparency="True" ResizeMode="NoResize"
+        WindowStartupLocation="CenterScreen">
+
+    <Window.Triggers>
+        <EventTrigger RoutedEvent="Window.Loaded">
+            <BeginStoryboard>
+                <Storyboard>
+                    <DoubleAnimation Storyboard.TargetProperty="Opacity"
+                                     From="0" To="1" Duration="0:0:0.35">
+                        <DoubleAnimation.EasingFunction><CubicEase EasingMode="EaseOut"/></DoubleAnimation.EasingFunction>
+                    </DoubleAnimation>
+                </Storyboard>
+            </BeginStoryboard>
+        </EventTrigger>
+    </Window.Triggers>
+
+    <Window.Resources>
+
+        <!-- Slider decrease filled -->
+        <Style x:Key="SliderDec" TargetType="RepeatButton">
+            <Setter Property="Focusable" Value="False"/>
+            <Setter Property="IsTabStop" Value="False"/>
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RepeatButton">
+                        <Border Height="3" CornerRadius="1.5">
+                            <Border.Background>
+                                <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                    <GradientStop Color="#005577" Offset="0"/>
+                                    <GradientStop Color="#00D8FF" Offset="1"/>
+                                </LinearGradientBrush>
+                            </Border.Background>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Slider increase empty -->
+        <Style x:Key="SliderInc" TargetType="RepeatButton">
+            <Setter Property="Focusable" Value="False"/>
+            <Setter Property="IsTabStop" Value="False"/>
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RepeatButton">
+                        <Border Height="3" CornerRadius="1.5" Background="#14142A"/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Slider thumb -->
+        <Style x:Key="SliderThumb" TargetType="Thumb">
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="Width" Value="14"/>
+            <Setter Property="Height" Value="14"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Thumb">
+                        <Grid>
+                            <Ellipse Fill="#00D8FF" Width="14" Height="14"/>
+                            <Ellipse Fill="White" Width="4" Height="4" Opacity="0.6"
+                                     HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Slider full -->
+        <Style x:Key="S" TargetType="Slider">
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Height" Value="18"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Slider">
+                        <Border Height="18" Background="Transparent">
+                            <Track x:Name="PART_Track" Margin="7,0">
+                                <Track.DecreaseRepeatButton>
+                                    <RepeatButton Style="{StaticResource SliderDec}" Command="Slider.DecreaseLarge"/>
+                                </Track.DecreaseRepeatButton>
+                                <Track.Thumb>
+                                    <Thumb Style="{StaticResource SliderThumb}"/>
+                                </Track.Thumb>
+                                <Track.IncreaseRepeatButton>
+                                    <RepeatButton Style="{StaticResource SliderInc}" Command="Slider.IncreaseLarge"/>
+                                </Track.IncreaseRepeatButton>
+                            </Track>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- ComboBox item -->
+        <Style x:Key="CBI" TargetType="ComboBoxItem">
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="Background" Value="#0D0D1C"/>
+            <Setter Property="Foreground" Value="#B4BACC"/>
+            <Setter Property="Padding" Value="12,8"/>
+            <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBoxItem">
+                        <Border x:Name="bg" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsHighlighted" Value="True">
+                                <Setter TargetName="bg" Property="Background" Value="#0A1E2E"/>
+                                <Setter Property="Foreground" Value="#00D8FF"/>
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="bg" Property="Background" Value="#071520"/>
+                                <Setter Property="Foreground" Value="#00D8FF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- ComboBox -->
+        <Style x:Key="CB" TargetType="ComboBox">
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="Foreground" Value="#B4BACC"/>
+            <Setter Property="Background" Value="#0D0D1C"/>
+            <Setter Property="BorderBrush" Value="#22223A"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="12,8"/>
+            <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="ItemContainerStyle" Value="{StaticResource CBI}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <Border x:Name="bd" Background="{TemplateBinding Background}"
+                                    BorderBrush="{TemplateBinding BorderBrush}"
+                                    BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6">
+                                <Grid Margin="{TemplateBinding Padding}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="16"/>
+                                    </Grid.ColumnDefinitions>
+                                    <ContentPresenter Grid.Column="0" Content="{TemplateBinding SelectionBoxItem}"
+                                                      VerticalAlignment="Center" IsHitTestVisible="False"/>
+                                    <Path Grid.Column="1" Data="M0,0 L4,0 L2,3 Z"
+                                          Fill="#445566" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+                                </Grid>
+                            </Border>
+                            <ToggleButton Focusable="False" OverridesDefaultStyle="True"
+                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                                <ToggleButton.Template>
+                                    <ControlTemplate TargetType="ToggleButton">
+                                        <Border Background="Transparent"/>
+                                    </ControlTemplate>
+                                </ToggleButton.Template>
+                            </ToggleButton>
+                            <Popup x:Name="PART_Popup" AllowsTransparency="True" Focusable="False"
+                                   IsOpen="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}}"
+                                   Placement="Bottom" PopupAnimation="Slide">
+                                <Border Background="#0D0D1C" BorderBrush="#22223A" BorderThickness="1"
+                                        CornerRadius="6" Margin="0,3,0,0"
+                                        MinWidth="{Binding ActualWidth, RelativeSource={RelativeSource TemplatedParent}}">
+                                    <Border.Effect>
+                                        <DropShadowEffect Color="#000" BlurRadius="20" ShadowDepth="5" Opacity="0.8"/>
+                                    </Border.Effect>
+                                    <ScrollViewer VerticalScrollBarVisibility="Auto">
+                                        <StackPanel IsItemsHost="True"/>
+                                    </ScrollViewer>
+                                </Border>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#009ABC"/>
+                            </Trigger>
+                            <Trigger Property="IsDropDownOpen" Value="True">
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#00D8FF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- CheckBox -->
+        <Style x:Key="CK" TargetType="CheckBox">
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Foreground" Value="#B4BACC"/>
+            <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <StackPanel Orientation="Horizontal">
+                            <Border x:Name="box" Width="16" Height="16" CornerRadius="4"
+                                    BorderBrush="#22223A" BorderThickness="1.5"
+                                    Background="Transparent" VerticalAlignment="Center">
+                                <Path x:Name="chk" Data="M2,8 L6,12 L13,4"
+                                      Stroke="#00D8FF" StrokeThickness="1.8"
+                                      StrokeStartLineCap="Round" StrokeEndLineCap="Round"
+                                      StrokeLineJoin="Round" Visibility="Collapsed"
+                                      HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                            </Border>
+                            <ContentPresenter Margin="9,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="chk" Property="Visibility" Value="Visible"/>
+                                <Setter TargetName="box" Property="BorderBrush" Value="#00D8FF"/>
+                                <Setter TargetName="box" Property="Background" Value="#061820"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="box" Property="BorderBrush" Value="#008AA0"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- TextBox -->
+        <Style x:Key="TX" TargetType="TextBox">
+            <Setter Property="Background" Value="#0D0D1C"/>
+            <Setter Property="Foreground" Value="#B4BACC"/>
+            <Setter Property="BorderBrush" Value="#22223A"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="10,7"/>
+            <Setter Property="FontFamily" Value="Consolas, Courier New"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="CaretBrush" Value="#00D8FF"/>
+            <Setter Property="SelectionBrush" Value="#003344"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TextBox">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6">
+                            <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"
+                                          VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsFocused" Value="True">
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#00D8FF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Ghost button -->
+        <Style x:Key="GhostBtn" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#505070"/>
+            <Setter Property="BorderBrush" Value="#1C1C30"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="22,9"/>
+            <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#0A0A18"/>
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#2A2A48"/>
+                                <Setter Property="Foreground" Value="#8080A0"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Primary button -->
+        <Style x:Key="PrimaryBtn" TargetType="Button">
+            <Setter Property="Background" Value="#00D8FF"/>
+            <Setter Property="Foreground" Value="#020810"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="28,9"/>
+            <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="Bold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}"
+                                CornerRadius="6" Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#30E5FF"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#009ABB"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Close button -->
+        <Style x:Key="CloseBtn" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Width" Value="28"/>
+            <Setter Property="Height" Value="28"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="6">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#3A0A14"/>
+                                <Setter Property="Foreground" Value="#FF4466"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+    </Window.Resources>
+
+    <Border CornerRadius="13" BorderThickness="1"
+            MouseLeftButtonDown="Window_MouseLeftButtonDown">
+        <Border.BorderBrush>
+            <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                <GradientStop Color="#252538" Offset="0"/>
+                <GradientStop Color="#0E0E1A" Offset="1"/>
+            </LinearGradientBrush>
+        </Border.BorderBrush>
+        <Border.Background>
+            <RadialGradientBrush Center="0.4,0.15" RadiusX="0.9" RadiusY="0.7">
+                <GradientStop Color="#0F0F1E" Offset="0"/>
+                <GradientStop Color="#070710" Offset="1"/>
+            </RadialGradientBrush>
+        </Border.Background>
+        <Border.Effect>
+            <DropShadowEffect Color="#000" BlurRadius="50" ShadowDepth="12" Opacity="0.8"/>
+        </Border.Effect>
+
+        <Grid ClipToBounds="True">
+            <!-- Dot texture -->
+            <!-- Dot texture (Removed per request) -->
+            <!-- Top cyan line -->
+            <Rectangle Height="1" VerticalAlignment="Top" Margin="100,0,100,0" Opacity="0.4" IsHitTestVisible="False">
+                <Rectangle.Fill>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                        <GradientStop Color="Transparent" Offset="0"/>
+                        <GradientStop Color="#00D8FF" Offset="0.5"/>
+                        <GradientStop Color="Transparent" Offset="1"/>
+                    </LinearGradientBrush>
+                </Rectangle.Fill>
+            </Rectangle>
+            <!-- Left accent bar -->
+            <Rectangle Width="3" HorizontalAlignment="Left" IsHitTestVisible="False" RadiusX="1.5" RadiusY="1.5">
+                <Rectangle.Fill>
+                    <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                        <GradientStop Color="#00D8FF" Offset="0"/>
+                        <GradientStop Color="#004466" Offset="0.5"/>
+                        <GradientStop Color="Transparent" Offset="1"/>
+                    </LinearGradientBrush>
+                </Rectangle.Fill>
+            </Rectangle>
+
+            <Grid Margin="26,20,26,22">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="14"/>
+                    <RowDefinition Height="*"/>
+                    <RowDefinition Height="14"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
+
+                <!-- HEADER -->
+                <Grid Grid.Row="0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <Border Width="36" Height="36" CornerRadius="8" Margin="0,0,12,0" VerticalAlignment="Center">
+                            <Border.Background>
+                                <LinearGradientBrush StartPoint="0,0" EndPoint="1,1">
+                                    <GradientStop Color="#00D8FF" Offset="0"/>
+                                    <GradientStop Color="#0044AA" Offset="1"/>
+                                </LinearGradientBrush>
+                            </Border.Background>
+                            <TextBlock Text="PT" FontFamily="Bahnschrift, Segoe UI Variable Display, Segoe UI"
+                                       FontSize="16" FontWeight="Bold" Foreground="#010810"
+                                       HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <StackPanel VerticalAlignment="Center">
+                            <TextBlock Text="PURETYPE"
+                                       FontFamily="Bahnschrift, Segoe UI Variable Display, Segoe UI"
+                                       FontSize="24" FontWeight="Bold" Foreground="#ECF0FF"/>
+                            <TextBlock Text="OLED SUBPIXEL RENDERER  ·  SETTINGS"
+                                       FontFamily="Consolas, Courier New"
+                                       FontSize="11" Foreground="#5C5C84" Margin="2,2,0,0"/>
+                        </StackPanel>
+                        <Border Background="#07192A" BorderBrush="#00D8FF" BorderThickness="1"
+                                CornerRadius="4" Padding="8,3" Margin="14,0,0,0" VerticalAlignment="Center">
+                            <TextBlock Text="v0.0.5" FontFamily="Consolas, Courier New"
+                                       FontSize="11" Foreground="#00D8FF" FontWeight="Bold"/>
+                        </Border>
+                    </StackPanel>
+                    <Button Grid.Column="1" Style="{StaticResource CloseBtn}" Click="Exit_Click" VerticalAlignment="Center">
+                        <TextBlock Text="✕" FontSize="11"
+                                   Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                    </Button>
+                </Grid>
+
+                <!-- HEADER DIVIDER -->
+                <Rectangle Grid.Row="1" Height="1" VerticalAlignment="Center">
+                    <Rectangle.Fill>
+                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                            <GradientStop Color="#00D8FF" Offset="0"/>
+                            <GradientStop Color="#141430" Offset="0.3"/>
+                            <GradientStop Color="Transparent" Offset="1"/>
+                        </LinearGradientBrush>
+                    </Rectangle.Fill>
+                </Rectangle>
+
+                <!-- CONTENT -->
+                <Grid Grid.Row="2">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="380"/>
+                        <ColumnDefinition Width="22"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
+
+                    <!-- LEFT: scrollable settings -->
+                    <Grid Grid.Column="0">
+                    <ScrollViewer x:Name="SettingsScroll"
+                                  VerticalScrollBarVisibility="Hidden"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  PreviewMouseWheel="ScrollViewer_MouseWheel"
+                                  ScrollChanged="SettingsScroll_ScrollChanged">
+                        <StackPanel Margin="0,0,10,0">
+
+                            <!-- ── RENDERING ── -->
+                            <StackPanel Margin="0,0,0,18">
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                                    <Rectangle Width="3" Height="10" RadiusX="1.5" RadiusY="1.5" Fill="#00D8FF" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                    <TextBlock Text="RENDERING" FontFamily="Consolas, Courier New" FontSize="11" FontWeight="Bold" Foreground="#7A82B0" VerticalAlignment="Center"/>
+                                </StackPanel>
+                                <Border Background="#0A0A18" BorderBrush="#16162A" BorderThickness="1" CornerRadius="8" Padding="16,14">
+                                    <StackPanel>
+                                        <!-- Panel type -->
+                                        <TextBlock Text="Display panel type" FontFamily="Segoe UI Variable Display, Segoe UI"
+                                                   FontSize="13" Foreground="#9098BC" Margin="0,0,0,6"/>
+                                        <ComboBox x:Name="PanelTypeCombo" Style="{StaticResource CB}"
+                                                  SelectionChanged="Setting_Changed_Combo">
+                                            <ComboBoxItem Content="LG WOLED  ·  RWBG stripe" Tag="rwbg" IsSelected="True"/>
+                                            <ComboBoxItem Content="LG WOLED  ·  RGWB stripe" Tag="rgwb"/>
+                                            <ComboBoxItem Content="Samsung QD-OLED  ·  Triangle" Tag="qd_oled_triangle"/>
+                                        </ComboBox>
+
+                                        <!-- Filter strength -->
+                                        <Grid Margin="0,16,0,0">
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <TextBlock Text="Filter strength" FontFamily="Segoe UI Variable Display, Segoe UI"
+                                                       FontSize="13" Foreground="#9098BC" VerticalAlignment="Center"/>
+                                            <Border Grid.Column="1" Background="#06182A" BorderBrush="#0A2A40" BorderThickness="1" CornerRadius="4" Padding="8,3">
+                                                <TextBlock Text="{Binding Value, ElementName=FilterStrengthSlider, StringFormat={}{0:F2}}"
+                                                           FontFamily="Consolas, Courier New" FontSize="12" Foreground="#00D8FF" FontWeight="Bold"/>
+                                            </Border>
+                                        </Grid>
+                                        <Slider x:Name="FilterStrengthSlider" Style="{StaticResource S}"
+                                                Minimum="0" Maximum="5" Value="1.0"
+                                                Margin="0,8,0,2"
+                                                TickFrequency="0.05" IsSnapToTickEnabled="True"
+                                                ValueChanged="Setting_Changed_Slider"/>
+                                        <TextBlock Text="0.0 = passthrough (disabled)    5.0 = maximum"
+                                                   FontFamily="Consolas, Courier New" FontSize="11" Foreground="#545478"/>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+
+                            <!-- ── QUALITY ── -->
+                            <StackPanel Margin="0,0,0,18">
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                                    <Rectangle Width="3" Height="10" RadiusX="1.5" RadiusY="1.5" Fill="#00D8FF" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                    <TextBlock Text="QUALITY" FontFamily="Consolas, Courier New" FontSize="11" FontWeight="Bold" Foreground="#7A82B0" VerticalAlignment="Center"/>
+                                </StackPanel>
+                                <Border Background="#0A0A18" BorderBrush="#16162A" BorderThickness="1" CornerRadius="8" Padding="16,14">
+                                    <StackPanel>
+                                        <!-- Gamma -->
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <TextBlock Text="Gamma correction" FontFamily="Segoe UI Variable Display, Segoe UI"
+                                                       FontSize="13" Foreground="#9098BC" VerticalAlignment="Center"/>
+                                            <Border Grid.Column="1" Background="#06182A" BorderBrush="#0A2A40" BorderThickness="1" CornerRadius="4" Padding="8,3">
+                                                <TextBlock Text="{Binding Value, ElementName=GammaSlider, StringFormat={}{0:F2}}"
+                                                           FontFamily="Consolas, Courier New" FontSize="12" Foreground="#00D8FF" FontWeight="Bold"/>
+                                            </Border>
+                                        </Grid>
+                                        <Slider x:Name="GammaSlider" Style="{StaticResource S}"
+                                                Minimum="0.5" Maximum="3.0" Value="1.0"
+                                                Margin="0,8,0,14"
+                                                TickFrequency="0.05" IsSnapToTickEnabled="True"
+                                                ValueChanged="Setting_Changed_Slider"/>
+
+                                        <!-- Subpixel hinting -->
+                                        <CheckBox x:Name="SubpixelHintingCheck" Style="{StaticResource CK}"
+                                                  Margin="0,0,0,10"
+                                                  Checked="Setting_Changed_Check" Unchecked="Setting_Changed_Check">
+                                            <StackPanel>
+                                                <TextBlock Text="Subpixel hinting (FT_LOAD_FORCE_AUTOHINT)" Foreground="#A8B0CC" FontSize="13"/>
+                                                <TextBlock Text="Crisper stems at small sizes — recommended for OLED" Foreground="#5C5C84" FontSize="11" Margin="0,3,0,0"/>
+                                            </StackPanel>
+                                        </CheckBox>
+
+                                        <!-- Fractional positioning -->
+                                        <CheckBox x:Name="FractionalPositioningCheck" Style="{StaticResource CK}"
+                                                  Checked="Setting_Changed_Check" Unchecked="Setting_Changed_Check">
+                                            <StackPanel>
+                                                <TextBlock Text="Fractional glyph positioning" Foreground="#A8B0CC" FontSize="13"/>
+                                                <TextBlock Text="Sub-pixel X placement — sharper than integer grid" Foreground="#5C5C84" FontSize="11" Margin="0,3,0,0"/>
+                                            </StackPanel>
+                                        </CheckBox>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+
+                            <!-- ── TONE MAPPING ── -->
+                            <StackPanel Margin="0,0,0,18">
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                                    <Rectangle Width="3" Height="10" RadiusX="1.5" RadiusY="1.5" Fill="#00D8FF" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                    <TextBlock Text="TONE MAPPING" FontFamily="Consolas, Courier New" FontSize="11" FontWeight="Bold" Foreground="#7A82B0" VerticalAlignment="Center"/>
+                                </StackPanel>
+                                <Border Background="#0A0A18" BorderBrush="#16162A" BorderThickness="1" CornerRadius="8" Padding="16,14">
+                                    <StackPanel>
+                                        <!-- Luma contrast -->
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <TextBlock Text="Luma contrast boost" FontFamily="Segoe UI Variable Display, Segoe UI"
+                                                       FontSize="13" Foreground="#9098BC" VerticalAlignment="Center"/>
+                                            <Border Grid.Column="1" Background="#06182A" BorderBrush="#0A2A40" BorderThickness="1" CornerRadius="4" Padding="8,3">
+                                                <TextBlock Text="{Binding Value, ElementName=LumaContrastSlider, StringFormat={}{0:F2}}"
+                                                           FontFamily="Consolas, Courier New" FontSize="12" Foreground="#00D8FF" FontWeight="Bold"/>
+                                            </Border>
+                                        </Grid>
+                                        <Slider x:Name="LumaContrastSlider" Style="{StaticResource S}"
+                                                Minimum="1.0" Maximum="3.0" Value="1.15"
+                                                Margin="0,8,0,14"
+                                                TickFrequency="0.05" IsSnapToTickEnabled="True"
+                                                ValueChanged="Setting_Changed_Slider"/>
+
+                                        <!-- Stem darkening -->
+                                        <CheckBox x:Name="StemDarkeningCheck" Style="{StaticResource CK}"
+                                                  Margin="0,0,0,10"
+                                                  Checked="StemDarkening_Changed" Unchecked="StemDarkening_Changed">
+                                            <TextBlock Text="Stem darkening" Foreground="#A8B0CC" FontSize="13"/>
+                                        </CheckBox>
+                                        <Grid x:Name="StemStrengthPanel">
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <TextBlock Text="Stem darkening strength" FontFamily="Segoe UI Variable Display, Segoe UI"
+                                                       FontSize="13" Foreground="#7A82B0" VerticalAlignment="Center"/>
+                                            <Border Grid.Column="1" Background="#06182A" BorderBrush="#0A2A40" BorderThickness="1" CornerRadius="4" Padding="8,3">
+                                                <TextBlock Text="{Binding Value, ElementName=StemStrengthSlider, StringFormat={}{0:F2}}"
+                                                           FontFamily="Consolas, Courier New" FontSize="12" Foreground="#006680" FontWeight="Bold"/>
+                                            </Border>
+                                        </Grid>
+                                        <Slider x:Name="StemStrengthSlider" Style="{StaticResource S}"
+                                                Minimum="0" Maximum="1.0" Value="0.25"
+                                                Margin="0,8,0,14"
+                                                TickFrequency="0.05" IsSnapToTickEnabled="True"
+                                                ValueChanged="Setting_Changed_Slider"/>
+
+                                        <!-- WOLED crosstalk -->
+                                        <StackPanel x:Name="WoledPanel">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                                <StackPanel Grid.Column="0">
+                                                    <TextBlock Text="WOLED white-subpixel crosstalk" FontFamily="Segoe UI Variable Display, Segoe UI"
+                                                               FontSize="13" Foreground="#9098BC"/>
+                                                    <TextBlock Text="Applies only to RWBG/RGWB panels" FontFamily="Consolas, Courier New"
+                                                               FontSize="11" Foreground="#545478" Margin="0,2,0,0"/>
+                                                </StackPanel>
+                                                <Border Grid.Column="1" Background="#06182A" BorderBrush="#0A2A40" BorderThickness="1" CornerRadius="4" Padding="8,3" VerticalAlignment="Center">
+                                                    <TextBlock Text="{Binding Value, ElementName=WoledCrosstalkSlider, StringFormat={}{0:F2}}"
+                                                               FontFamily="Consolas, Courier New" FontSize="12" Foreground="#00D8FF" FontWeight="Bold"/>
+                                                </Border>
+                                            </Grid>
+                                            <Slider x:Name="WoledCrosstalkSlider" Style="{StaticResource S}"
+                                                    Minimum="0" Maximum="1.0" Value="0.08"
+                                                    Margin="0,8,0,0"
+                                                    TickFrequency="0.01" IsSnapToTickEnabled="True"
+                                                    ValueChanged="Setting_Changed_Slider"/>
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+
+                            <!-- ── LOD ── -->
+                            <StackPanel Margin="0,0,0,18">
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                                    <Rectangle Width="3" Height="10" RadiusX="1.5" RadiusY="1.5" Fill="#00D8FF" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                    <TextBlock Text="LOD THRESHOLDS" FontFamily="Consolas, Courier New" FontSize="11" FontWeight="Bold" Foreground="#7A82B0" VerticalAlignment="Center"/>
+                                </StackPanel>
+                                <Border Background="#0A0A18" BorderBrush="#16162A" BorderThickness="1" CornerRadius="8" Padding="16,14">
+                                    <StackPanel>
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="Small text threshold" FontFamily="Segoe UI Variable Display, Segoe UI" FontSize="13" Foreground="#9098BC"/>
+                                                <TextBlock Text="Below this: small-text rasterization" FontFamily="Consolas, Courier New" FontSize="11" Foreground="#545478" Margin="0,2,0,0"/>
+                                            </StackPanel>
+                                            <Border Grid.Column="1" Background="#06182A" BorderBrush="#0A2A40" BorderThickness="1" CornerRadius="4" Padding="8,3" VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding Value, ElementName=LodSmallSlider, StringFormat={}{0:F0} px}"
+                                                           FontFamily="Consolas, Courier New" FontSize="12" Foreground="#00D8FF" FontWeight="Bold"/>
+                                            </Border>
+                                        </Grid>
+                                        <Slider x:Name="LodSmallSlider" Style="{StaticResource S}"
+                                                Minimum="6" Maximum="96" Value="10"
+                                                Margin="0,8,0,14"
+                                                TickFrequency="1" IsSnapToTickEnabled="True"
+                                                ValueChanged="LodSmall_Changed"/>
+
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="Large text threshold" FontFamily="Segoe UI Variable Display, Segoe UI" FontSize="13" Foreground="#9098BC"/>
+                                                <TextBlock Text="Above this: heading rasterization" FontFamily="Consolas, Courier New" FontSize="11" Foreground="#545478" Margin="0,2,0,0"/>
+                                            </StackPanel>
+                                            <Border Grid.Column="1" Background="#06182A" BorderBrush="#0A2A40" BorderThickness="1" CornerRadius="4" Padding="8,3" VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding Value, ElementName=LodLargeSlider, StringFormat={}{0:F0} px}"
+                                                           FontFamily="Consolas, Courier New" FontSize="12" Foreground="#00D8FF" FontWeight="Bold"/>
+                                            </Border>
+                                        </Grid>
+                                        <Slider x:Name="LodLargeSlider" Style="{StaticResource S}"
+                                                Minimum="7" Maximum="160" Value="22"
+                                                Margin="0,8,0,0"
+                                                TickFrequency="1" IsSnapToTickEnabled="True"
+                                                ValueChanged="Setting_Changed_Slider"/>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+
+                            <!-- ── EXCLUSIONS ── -->
+                            <StackPanel Margin="0,0,0,18">
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                                    <Rectangle Width="3" Height="10" RadiusX="1.5" RadiusY="1.5" Fill="#00D8FF" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                    <TextBlock Text="EXCLUSIONS" FontFamily="Consolas, Courier New" FontSize="11" FontWeight="Bold" Foreground="#7A82B0" VerticalAlignment="Center"/>
+                                </StackPanel>
+                                <Border Background="#0A0A18" BorderBrush="#16162A" BorderThickness="1" CornerRadius="8" Padding="16,14">
+                                    <StackPanel>
+                                        <TextBlock Text="Process Blacklist (comma-separated executables)"
+                                                   FontFamily="Segoe UI Variable Display, Segoe UI"
+                                                   FontSize="13" Foreground="#7A82B0" Margin="0,0,0,6"/>
+                                        <TextBox x:Name="BlacklistText" Style="{StaticResource TX}" 
+                                                 Height="120" TextWrapping="Wrap" AcceptsReturn="True"
+                                                 VerticalScrollBarVisibility="Auto"/>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+
+                            <!-- ── SYSTEM ── -->
+                            <StackPanel Margin="0,0,0,18">
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                                    <Rectangle Width="3" Height="10" RadiusX="1.5" RadiusY="1.5" Fill="#00D8FF" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                    <TextBlock Text="SYSTEM" FontFamily="Consolas, Courier New" FontSize="11" FontWeight="Bold" Foreground="#7A82B0" VerticalAlignment="Center"/>
+                                </StackPanel>
+                                <Border Background="#0A0A18" BorderBrush="#16162A" BorderThickness="1" CornerRadius="8" Padding="16,14">
+                                    <CheckBox x:Name="StartWithWindowsCheck" Style="{StaticResource CK}"
+                                              Checked="Setting_Changed_Check" Unchecked="Setting_Changed_Check">
+                                        <StackPanel>
+                                            <TextBlock Text="Start with Windows" Foreground="#A8B0CC" FontSize="13"/>
+                                            <TextBlock Text="Launches puretype.exe silently at login" Foreground="#5C5C84" FontSize="11" Margin="0,3,0,0"/>
+                                        </StackPanel>
+                                    </CheckBox>
+                                </Border>
+                            </StackPanel>
+
+                            <!-- ── DEBUG ── -->
+                            <StackPanel Margin="0,0,0,18">
+                                <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
+                                    <Rectangle Width="3" Height="10" RadiusX="1.5" RadiusY="1.5" Fill="#00D8FF" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                    <TextBlock Text="DEBUG" FontFamily="Consolas, Courier New" FontSize="11" FontWeight="Bold" Foreground="#7A82B0" VerticalAlignment="Center"/>
+                                </StackPanel>
+                                <Border Background="#0A0A18" BorderBrush="#16162A" BorderThickness="1" CornerRadius="8" Padding="16,14">
+                                    <StackPanel>
+                                        <CheckBox x:Name="DebugEnabledCheck" Style="{StaticResource CK}"
+                                                  Margin="0,0,0,12"
+                                                  Checked="Debug_Changed" Unchecked="Debug_Changed">
+                                            <StackPanel>
+                                                <TextBlock Text="Enable debug logging" Foreground="#A8B0CC" FontSize="13"/>
+                                                <TextBlock Text="Has measurable overhead — use only when diagnosing issues" Foreground="#5C5C84" FontSize="11" Margin="0,3,0,0"/>
+                                            </StackPanel>
+                                        </CheckBox>
+                                        <StackPanel x:Name="DebugOptionsPanel">
+                                            <TextBlock Text="Log file path (relative to DLL directory)"
+                                                       FontFamily="Segoe UI Variable Display, Segoe UI"
+                                                       FontSize="13" Foreground="#7A82B0" Margin="0,0,0,6"/>
+                                            <TextBox x:Name="LogFileText" Style="{StaticResource TX}" Margin="0,0,0,12"/>
+                                            <CheckBox x:Name="HighlightGlyphsCheck" Style="{StaticResource CK}"
+                                                      Checked="Setting_Changed_Check" Unchecked="Setting_Changed_Check">
+                                                <TextBlock Text="Highlight rendered glyphs (cyan tint)" Foreground="#A8B0CC" FontSize="13"/>
+                                            </CheckBox>
+                                        </StackPanel>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <!-- Clean hairline at bottom edge — replaces the blurry glow -->
+                    <Rectangle x:Name="ScrollFadeBottom"
+                               VerticalAlignment="Bottom" Height="1"
+                               IsHitTestVisible="False" Opacity="0.25">
+                        <Rectangle.Fill>
+                            <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                                <GradientStop Color="Transparent" Offset="0"/>
+                                <GradientStop Color="#00D8FF" Offset="0.4"/>
+                                <GradientStop Color="#00D8FF" Offset="0.6"/>
+                                <GradientStop Color="Transparent" Offset="1"/>
+                            </LinearGradientBrush>
+                        </Rectangle.Fill>
+                    </Rectangle>
+
+                    <!-- Thin scroll indicator bar on the right edge -->
+                    <Border x:Name="ScrollIndicatorTrack"
+                            Width="3" HorizontalAlignment="Right"
+                            VerticalAlignment="Stretch" Margin="0,4,2,4"
+                            Background="#0F0F22" CornerRadius="1.5"
+                            IsHitTestVisible="False" Opacity="0.7">
+                        <Border x:Name="ScrollIndicatorThumb"
+                                Width="3" CornerRadius="1.5"
+                                VerticalAlignment="Top" Height="40">
+                            <Border.Background>
+                                <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                    <GradientStop Color="#00D8FF" Offset="0"/>
+                                    <GradientStop Color="#004466" Offset="1"/>
+                                </LinearGradientBrush>
+                            </Border.Background>
+                        </Border>
+                    </Border>
+
+                    </Grid>
+
+                    <!-- RIGHT: preview -->
+                    <Grid Grid.Column="2">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="10"/>
+                            <RowDefinition Height="*"/>
+                            <RowDefinition Height="10"/>
+                            <RowDefinition Height="Auto"/>
+                        </Grid.RowDefinitions>
+
+                        <Grid Grid.Row="0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <StackPanel Orientation="Horizontal">
+                                <Rectangle Width="3" Height="10" RadiusX="1.5" RadiusY="1.5" Fill="#00D8FF" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                <TextBlock Text="LIVE PREVIEW" FontFamily="Consolas, Courier New"
+                                           FontSize="11" FontWeight="Bold" Foreground="#7A82B0" VerticalAlignment="Center"/>
+                            </StackPanel>
+                            <ComboBox x:Name="PreviewSizeCombo" Grid.Column="1" Style="{StaticResource CB}"
+                                      Width="80" SelectionChanged="PreviewSize_Changed">
+                                <ComboBoxItem Content="12 px" Tag="12"/>
+                                <ComboBoxItem Content="16 px" Tag="16"/>
+                                <ComboBoxItem Content="24 px" Tag="24"/>
+                                <ComboBoxItem Content="32 px" Tag="32" IsSelected="True"/>
+                                <ComboBoxItem Content="48 px" Tag="48"/>
+                                <ComboBoxItem Content="64 px" Tag="64"/>
+                            </ComboBox>
+                        </Grid>
+
+                        <Border Grid.Row="2" CornerRadius="10" BorderBrush="#14142A" BorderThickness="1" ClipToBounds="True">
+                            <Border.Background>
+                                <RadialGradientBrush Center="0.5,0.5" RadiusX="0.8" RadiusY="0.8">
+                                    <GradientStop Color="#0A0A16" Offset="0"/>
+                                    <GradientStop Color="#040408" Offset="1"/>
+                                </RadialGradientBrush>
+                            </Border.Background>
+                            <Grid>
+                                <Rectangle IsHitTestVisible="False" Opacity="0.04">
+                                    <Rectangle.Fill>
+                                        <DrawingBrush TileMode="Tile" Viewport="0,0,1,3" ViewportUnits="Absolute">
+                                            <DrawingBrush.Drawing>
+                                                <GeometryDrawing Brush="White">
+                                                    <GeometryDrawing.Geometry><RectangleGeometry Rect="0,0,1,1"/></GeometryDrawing.Geometry>
+                                                </GeometryDrawing>
+                                            </DrawingBrush.Drawing>
+                                        </DrawingBrush>
+                                    </Rectangle.Fill>
+                                </Rectangle>
+
+                                <Image x:Name="PreviewImage"
+                                       RenderOptions.BitmapScalingMode="NearestNeighbor"
+                                       Stretch="Uniform" Margin="20"/>
+
+                                <TextBlock x:Name="PreviewFallback"
+                                           Text="Preview unavailable&#x0a;(PureType.dll not found)"
+                                           FontFamily="Consolas, Courier New"
+                                           FontSize="11" Foreground="#545478" TextAlignment="Center"
+                                           HorizontalAlignment="Center" VerticalAlignment="Center"
+                                           Visibility="Collapsed"/>
+
+                                <Grid VerticalAlignment="Bottom" Margin="0,0,0,14" HorizontalAlignment="Center">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="20"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Border Grid.Column="0" Background="#CC040408" CornerRadius="5"
+                                            BorderBrush="#30FF5050" BorderThickness="1" Padding="9,4">
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="← " FontFamily="Consolas, Courier New" FontSize="10" Foreground="#662222"/>
+                                            <TextBlock Text="CLEARTYPE" FontFamily="Consolas, Courier New" FontSize="10" FontWeight="Bold" Foreground="#FF5050"/>
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Grid.Column="2" Background="#CC00060E" CornerRadius="5"
+                                            BorderBrush="#2500D8FF" BorderThickness="1" Padding="9,4">
+                                        <StackPanel Orientation="Horizontal">
+                                            <TextBlock Text="PURETYPE" FontFamily="Consolas, Courier New" FontSize="10" FontWeight="Bold" Foreground="#00D8FF"/>
+                                            <TextBlock Text=" →" FontFamily="Consolas, Courier New" FontSize="10" Foreground="#006688"/>
+                                        </StackPanel>
+                                    </Border>
+                                </Grid>
+
+                                <Rectangle Width="1" HorizontalAlignment="Center" Opacity="0.1" IsHitTestVisible="False">
+                                    <Rectangle.Fill>
+                                        <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+                                            <GradientStop Color="Transparent" Offset="0"/>
+                                            <GradientStop Color="#00D8FF" Offset="0.2"/>
+                                            <GradientStop Color="#00D8FF" Offset="0.8"/>
+                                            <GradientStop Color="Transparent" Offset="1"/>
+                                        </LinearGradientBrush>
+                                    </Rectangle.Fill>
+                                </Rectangle>
+                            </Grid>
+                        </Border>
+
+                        <TextBlock Grid.Row="4"
+                                   Text="Arial  ·  NearestNeighbor  ·  subpixel split comparison"
+                                   FontFamily="Consolas, Courier New" FontSize="10"
+                                   Foreground="#484870" HorizontalAlignment="Center"/>
+                    </Grid>
+                </Grid>
+
+                <!-- FOOTER DIVIDER -->
+                <Rectangle Grid.Row="3" Height="1" VerticalAlignment="Center">
+                    <Rectangle.Fill>
+                        <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                            <GradientStop Color="Transparent" Offset="0"/>
+                            <GradientStop Color="#181828" Offset="0.2"/>
+                            <GradientStop Color="#181828" Offset="0.8"/>
+                            <GradientStop Color="Transparent" Offset="1"/>
+                        </LinearGradientBrush>
+                    </Rectangle.Fill>
+                </Rectangle>
+
+                <!-- FOOTER -->
+                <Grid Grid.Row="4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Grid.Column="0" VerticalAlignment="Center"
+                               Text="New apps apply instantly  ·  reopen existing ones"
+                               FontFamily="Consolas, Courier New" FontSize="11" Foreground="#484870"/>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal">
+                        <Button x:Name="CloseButton" Content="CLOSE" Style="{StaticResource GhostBtn}"
+                                Margin="0,0,12,0" Click="Exit_Click"/>
+                        <Button x:Name="SaveButton" Content="SAVE  ·  APPLY" Style="{StaticResource PrimaryBtn}"
+                                Click="Save_Click"/>
+                    </StackPanel>
+                </Grid>
+
+            </Grid>
+        </Grid>
+    </Border>
+</Window>

@@ -113,6 +113,8 @@ namespace puretype
 
         void Shutdown();
 
+        uint32_t GetGlyphIndex(const std::string& fontPath, uint32_t charCode);
+
         const GlyphBitmap* RasterizeGlyph(const std::string& fontPath,
                                           uint32_t glyphIndex,
                                           uint32_t pixelSize,

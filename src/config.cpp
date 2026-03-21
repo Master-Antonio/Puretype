@@ -141,6 +141,35 @@ namespace puretype
         m_data.highlightRenderedGlyphs =
             (highlightStr == "true" || highlightStr == "1" || highlightStr == "yes");
 
+        std::string blacklistStr = ToLower(GetValue("general", "blacklist", ""));
+        m_data.blacklist.clear();
+        if (blacklistStr.empty())
+        {
+            // Default essential anti-cheat and system processes
+            m_data.blacklist = {
+                "vgc.exe", "vgtray.exe", "easyanticheat.exe", "easyanticheat_eos.exe",
+                "beservice.exe", "bedaisy.exe", "gameguard.exe", "nprotect.exe",
+                "pnkbstra.exe", "pnkbstrb.exe", "faceit.exe", "faceit_ac.exe",
+                "csgo.exe", "cs2.exe", "valorant.exe", "valorant-win64-shipping.exe",
+                "r5apex.exe", "fortniteclient-win64-shipping.exe", "eldenring.exe",
+                "gta5.exe", "rdr2.exe", "overwatchlauncher.exe", "rainbowsix.exe",
+                "destiny2.exe", "tarkov.exe"
+            };
+        }
+        else
+        {
+            std::stringstream ss(blacklistStr);
+            std::string item;
+            while (std::getline(ss, item, ','))
+            {
+                std::string cleaned = Trim(item);
+                if (!cleaned.empty())
+                {
+                    m_data.blacklist.push_back(cleaned);
+                }
+            }
+        }
+
         return true;
     }
 }
