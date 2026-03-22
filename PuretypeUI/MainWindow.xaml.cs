@@ -278,10 +278,12 @@ namespace PuretypeUI
 
                 int panelType = panelItem.Tag?.ToString() switch
                 {
-                    "rwbg"             => 1,
-                    "rgwb"             => 2,
-                    "qd_oled_triangle" => 0,
-                    _                  => 1
+                    "rwbg"             => 0,
+                    "rgwb"             => 1,
+                    "qd_oled_gen1"     => 2,
+                    "qd_oled_gen3"     => 3,
+                    "qd_oled_gen4"     => 4,
+                    _                  => 0
                 };
 
                 var sizeItem = PreviewSizeCombo.SelectedItem as ComboBoxItem;
@@ -341,7 +343,8 @@ namespace PuretypeUI
         private void SyncWoledVisibility()
         {
             var tag = (PanelTypeCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "rwbg";
-            WoledPanel.Visibility = tag == "qd_oled_triangle" ? Visibility.Collapsed : Visibility.Visible;
+            bool isWoled = tag == "rwbg" || tag == "rgwb";
+            WoledPanel.Visibility = isWoled ? Visibility.Visible : Visibility.Collapsed;
         }
 
         private void SyncStemStrengthEnabled()

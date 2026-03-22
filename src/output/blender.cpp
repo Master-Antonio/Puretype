@@ -215,7 +215,28 @@ namespace puretype
         float snappedWorldY = physY / (rtDpiY / 96.0f);
 
         D2D1_MATRIX_3X2_F inv = transform;
-        D2D1InvertMatrix(&inv);
+        // D2D1InvertMatrix returns FALSE when the matrix is singular (det == 0),
+        // which can happen during collapsed animations or degenerate transforms.
+        // Using the uninverted garbage matrix places glyphs at arbitrary positions.
+        //
+        // Fix: when the transform is not invertible, draw at the original logical
+        // coordinates (x, y) without pixel snapping. The glyph renders correctly,
+        // just without sub-pixel position correction. We must NOT return false here
+        // because that triggers the allGlyphsBlitted=false fallback which forwards
+        // the entire glyph run to DWrite — re-drawing all glyphs already rendered
+        // by PureType in this call with standard ClearType on top of them.
+        if (!D2D1InvertMatrix(&inv))
+        {
+            D2D1_RECT_F destRect = {
+                x,
+                y,
+                x + (static_cast<float>(bitmap.width) / pixelsPerDip),
+                y + (static_cast<float>(bitmap.height) / pixelsPerDip)
+            };
+            pRT->DrawBitmap(pBitmap, destRect, 1.0f, D2D1_BITMAP_INTERPOLATION_MODE_NEAREST_NEIGHBOR);
+            pBitmap->Release();
+            return true;
+        }
 
         float logicalX = (snappedWorldX * inv._11) + (snappedWorldY * inv._21) + inv._31;
         float logicalY = (snappedWorldX * inv._12) + (snappedWorldY * inv._22) + inv._32;

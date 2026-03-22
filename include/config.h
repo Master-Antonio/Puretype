@@ -7,14 +7,16 @@ namespace puretype
 {
     enum class PanelType
     {
-        QD_OLED_TRIANGLE,
-        RWBG,
-        RGWB
+        RWBG, // LG WOLED — subpixel order R W B G
+        RGWB, // LG WOLED — subpixel order R G W B (newer models)
+        QD_OLED_GEN1, // Samsung QD-OLED gen 1-2 — oval, asymmetric R>B (AW3423DW etc.)
+        QD_OLED_GEN3, // Samsung QD-OLED gen 3   — rectangular, R≈B nearly symmetric
+        QD_OLED_GEN4, // Samsung QD-OLED gen 4   — rectangular, R=B equal width
     };
 
     struct ConfigData
     {
-        PanelType panelType = PanelType::QD_OLED_TRIANGLE;
+        PanelType panelType = PanelType::RWBG;
         float filterStrength = 1.0f;
         float gamma = 1.0f;
         bool enableSubpixelHinting = true;

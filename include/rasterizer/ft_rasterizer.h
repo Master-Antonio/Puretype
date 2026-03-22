@@ -82,7 +82,8 @@ namespace puretype
     {
     public:
         const GlyphBitmap* TryGet(const GlyphCacheKey& key);
-        const GlyphBitmap* Put(const GlyphCacheKey& key, GlyphBitmap&& bitmap, size_t extraBytes);
+        bool TryGetCopy(const GlyphCacheKey& key, GlyphBitmap& out);
+        const GlyphBitmap* Put(const GlyphCacheKey& key, GlyphBitmap&& bitmap, size_t extraBytes = 0);
         void Clear();
 
     private:

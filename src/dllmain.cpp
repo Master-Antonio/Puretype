@@ -120,8 +120,12 @@ BOOL APIENTRY DllMain(const HMODULE hModule, const DWORD reason, LPVOID)
                             PURETYPE_VERSION_PATCH);
                 PureTypeLog("Host process: %ls", hostExe);
                 auto panelName = "RWBG";
-                if (puretype::Config::Instance().Data().panelType == puretype::PanelType::QD_OLED_TRIANGLE)
-                    panelName = "QD_OLED_TRIANGLE";
+                if (puretype::Config::Instance().Data().panelType == puretype::PanelType::QD_OLED_GEN1)
+                    panelName = "QD_OLED_GEN1";
+                else if (puretype::Config::Instance().Data().panelType == puretype::PanelType::QD_OLED_GEN3)
+                    panelName = "QD_OLED_GEN3";
+                else if (puretype::Config::Instance().Data().panelType == puretype::PanelType::QD_OLED_GEN4)
+                    panelName = "QD_OLED_GEN4";
                 else if (puretype::Config::Instance().Data().panelType == puretype::PanelType::RGWB)
                     panelName = "RGWB";
                 PureTypeLog("Panel type: %s", panelName);

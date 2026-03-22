@@ -11,7 +11,9 @@ namespace puretype
     {
         if (bitmap.data.empty() || bitmap.width <= 0 || bitmap.height <= 0) return;
 
-        const bool qdPanel = (cfg.panelType == PanelType::QD_OLED_TRIANGLE);
+        const bool qdPanel = (cfg.panelType == PanelType::QD_OLED_GEN1 ||
+            cfg.panelType == PanelType::QD_OLED_GEN3 ||
+            cfg.panelType == PanelType::QD_OLED_GEN4);
         const bool tinyText = (bitmap.height <= 18);
         const bool smallText = (bitmap.height <= 24);
         const float sizeBoost = std::clamp((24.0f - static_cast<float>(bitmap.height)) / 24.0f, 0.0f, 1.0f);

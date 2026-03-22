@@ -127,6 +127,7 @@ namespace puretype::hooks
             auto* pUnk = static_cast<IUnknown*>(clientDrawingContext);
             if (!IsReadablePointer(pUnk)) return nullptr;
 
+            // Try ID2D1DeviceContext first (D2D1.1+, most modern apps).
             ID2D1DeviceContext* deviceContext = nullptr;
             if (SUCCEEDED(
                 pUnk->QueryInterface(__uuidof(ID2D1DeviceContext), reinterpret_cast<void**>(&deviceContext))))
@@ -134,22 +135,12 @@ namespace puretype::hooks
                 return deviceContext;
             }
 
+            // Fall back to base ID2D1RenderTarget.
             ID2D1RenderTarget* renderTarget = nullptr;
             if (SUCCEEDED(
                 pUnk->QueryInterface(__uuidof(ID2D1RenderTarget), reinterpret_cast<void**>(&renderTarget))))
             {
                 return renderTarget;
-            }
-
-            if (IsReadablePointer(*reinterpret_cast<void**>(clientDrawingContext)))
-            {
-                auto** vtable = *reinterpret_cast<void***>(clientDrawingContext);
-                if (vtable && vtable[0] && IsFromD2DModule(vtable[0]))
-                {
-                    auto* rt = reinterpret_cast<ID2D1RenderTarget*>(clientDrawingContext);
-                    rt->AddRef();
-                    return rt;
-                }
             }
 
             return nullptr;
@@ -344,6 +335,13 @@ namespace puretype::hooks
                                                clientDrawingEffect);
                 }
 
+                if (!glyphRun->glyphIndices)
+                {
+                    return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
+                                               measuringMode, glyphRun, glyphRunDescription,
+                                               clientDrawingEffect);
+                }
+
                 if (g_insideDWriteDrawGlyphRun)
                 {
                     return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
@@ -432,20 +430,33 @@ namespace puretype::hooks
                     {
                         textColor = brush->GetColor();
                         brush->Release();
-                        PureTypeLog("DWrite DrawGlyphRun: color from brush R=%.2f G=%.2f B=%.2f A=%.2f",
-                                    textColor.r, textColor.g, textColor.b, textColor.a);
+                        if (cfg.debugEnabled)
+                        {
+                            PureTypeLog("DWrite DrawGlyphRun: color from brush R=%.2f G=%.2f B=%.2f A=%.2f",
+                                        textColor.r, textColor.g, textColor.b, textColor.a);
+                        }
                     }
                     else
                     {
-                        PureTypeLog("DWrite DrawGlyphRun: clientDrawingEffect present but NOT a SolidColorBrush");
+                        if (cfg.debugEnabled)
+                        {
+                            PureTypeLog("DWrite DrawGlyphRun: clientDrawingEffect present but NOT a SolidColorBrush");
+                        }
                     }
                 }
                 else
                 {
-                    PureTypeLog("DWrite DrawGlyphRun: clientDrawingEffect is NULL — defaulting to black");
+                    if (cfg.debugEnabled)
+                    {
+                        PureTypeLog("DWrite DrawGlyphRun: clientDrawingEffect is NULL — defaulting to black");
+                    }
                 }
-                PureTypeLog("  font='%s' emSize=%.1f pixelsPerDip=%.2f pixelSize=%u glyphCount=%u",
-                            fontPath.c_str(), glyphRun->fontEmSize, pixelsPerDip, pixelSize, glyphRun->glyphCount);
+                if (cfg.debugEnabled)
+                {
+                    PureTypeLog("  font='%s' emSize=%.1f pixelsPerDip=%.2f pixelSize=%u glyphCount=%u",
+                                fontPath.c_str(), glyphRun->fontEmSize, pixelsPerDip, pixelSize,
+                                glyphRun->glyphCount);
+                }
 
                 struct PendingGlyph
                 {

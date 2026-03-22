@@ -76,10 +76,40 @@ namespace puretype
         }
         file.close();
 
-        if (std::string panelStr = ToLower(GetValue("general", "paneltype", "rwbg")); panelStr == "qd_oled_triangle" ||
+        // Panel type parsing.
+        //
+        // QD-OLED subpixel geometry differs across generations — each gen has
+        // different physical R/B center positions that affect interpolation weights:
+        //
+        //   Gen 1-2 (AW3423DW, AW3423DWF, Odyssey G8 OLED 34" gen1, Odyssey Neo G9 OLED):
+        //     Oval subpixels, R clearly larger than B.
+        //     R center ≈ 0.280, G center = 0.500, B center ≈ 0.720
+        //     Use: qd_oled_gen1  (alias: qd_oled_triangle, qdoled, triangular)
+        //
+        //   Gen 3 (Samsung Odyssey G8 OLED 27" QHD, Dell AW2725DF, 32" 4K models):
+        //     Rectangular subpixels, R slightly wider than B but nearly symmetric.
+        //     R center ≈ 0.250, G center = 0.500, B center ≈ 0.750
+        //     Use: qd_oled_gen3
+        //
+        //   Gen 4 (MSI MPG 272URX, 27" 4K UHD models, 2024-2025):
+        //     Rectangular subpixels, R ≈ B near-equal width.
+        //     R center ≈ 0.250, G center = 0.500, B center ≈ 0.750
+        //     Use: qd_oled_gen4
+        //     (Same weights as gen3; kept separate for future tuning)
+
+        if (std::string panelStr = ToLower(GetValue("general", "paneltype", "rwbg"));
+            panelStr == "qd_oled_gen1" || panelStr == "qd_oled_triangle" ||
             panelStr == "qdoled" || panelStr == "triangular")
         {
-            m_data.panelType = PanelType::QD_OLED_TRIANGLE;
+            m_data.panelType = PanelType::QD_OLED_GEN1;
+        }
+        else if (panelStr == "qd_oled_gen3")
+        {
+            m_data.panelType = PanelType::QD_OLED_GEN3;
+        }
+        else if (panelStr == "qd_oled_gen4")
+        {
+            m_data.panelType = PanelType::QD_OLED_GEN4;
         }
         else if (panelStr == "rgwb")
         {
@@ -131,6 +161,9 @@ namespace puretype
 
         try { m_data.stemDarkeningStrength = std::stof(GetValue("general", "stemdarkeningstrength", "0.4")); }
         catch (...) { m_data.stemDarkeningStrength = 0.4f; }
+        // Clamp to a sane range. Values above ~2.0 invert coverage through
+        // applyStemDarkening and make text invisible; negative values brighten stems.
+        m_data.stemDarkeningStrength = std::clamp(m_data.stemDarkeningStrength, 0.0f, 2.0f);
 
         std::string debugStr = ToLower(GetValue("debug", "enabled", "false"));
         m_data.debugEnabled = (debugStr == "true" || debugStr == "1" || debugStr == "yes");
