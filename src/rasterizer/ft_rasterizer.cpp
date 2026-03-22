@@ -57,6 +57,26 @@ namespace puretype
         return nullptr;
     }
 
+    // Bug 1 fix: safe copy under lock.
+    //
+    // TryGet returns a raw pointer into the LRU list and then releases the mutex.
+    // A concurrent Put() on another thread can evict that entry before the caller
+    // dereferences the pointer — classic use-after-free.
+    //
+    // TryGetCopy copies the bitmap while the mutex is held and returns it by value.
+    // The caller stores it in a thread_local so no heap allocation is needed.
+    bool GlyphCache::TryGetCopy(const GlyphCacheKey& key, GlyphBitmap& out)
+    {
+        std::lock_guard lock(m_mutex);
+        if (const auto it = m_cacheMap.find(key); it != m_cacheMap.end())
+        {
+            m_cacheList.splice(m_cacheList.begin(), m_cacheList, it->second);
+            out = it->second->bitmap; // copy while mutex is held
+            return true;
+        }
+        return false;
+    }
+
     const GlyphBitmap* GlyphCache::Put(const GlyphCacheKey& key, GlyphBitmap&& bitmap, size_t extraBytes)
     {
         std::lock_guard lock(m_mutex);
@@ -224,8 +244,17 @@ namespace puretype
             cfg.enableSubpixelHinting
         };
 
-        // 1. Thread-safe cache check (non-blocking for FreeType).
-        if (const GlyphBitmap* cached = m_cache.TryGet(key)) return cached;
+        // 1. Thread-safe cache check — copy under lock to prevent use-after-free.
+        //
+        // TryGet returns a raw pointer that becomes dangling if a concurrent Put()
+        // evicts the entry between the mutex release and the caller's dereference.
+        // TryGetCopy copies the bitmap while holding the lock; the thread_local
+        // staging slot avoids a heap allocation per lookup.
+        {
+            static thread_local GlyphBitmap tl_cachedBitmap;
+            if (m_cache.TryGetCopy(key, tl_cachedBitmap))
+                return &tl_cachedBitmap;
+        }
 
         int bmpWidth = 0;
         int bmpHeight = 0;
@@ -263,9 +292,12 @@ namespace puretype
             // We still render with FT_RENDER_MODE_LCD to obtain the 3× horizontal
             // oversampled bitmap that our TriangularFilter expects.
             FT_Int32 loadFlags = FT_LOAD_DEFAULT;
-            if (cfg.panelType == PanelType::QD_OLED_TRIANGLE)
+            const bool isQdPanel = (cfg.panelType == PanelType::QD_OLED_GEN1 ||
+                cfg.panelType == PanelType::QD_OLED_GEN3 ||
+                cfg.panelType == PanelType::QD_OLED_GEN4);
+            if (isQdPanel)
             {
-                // Isotropic hinting — no horizontal-stripe bias.
+                // Isotropic hinting — no horizontal-stripe bias for triangular layout.
                 loadFlags |= FT_LOAD_TARGET_NORMAL;
             }
             else
@@ -278,10 +310,10 @@ namespace puretype
                 loadFlags |= FT_LOAD_FORCE_AUTOHINT;
 
             // Panel-type base phase offsets, in FT 26.6 fractional units.
-            // QD-OLED (triangular): 0.5px H + ~0.33px V for triangular subpixel geometry.
-            // Standard RWBG/RGWB:  0.375px H, no V offset.
-            const FT_Pos oledPhaseX = (cfg.panelType == PanelType::QD_OLED_TRIANGLE) ? 32 : 24;
-            const FT_Pos oledPhaseY = (cfg.panelType == PanelType::QD_OLED_TRIANGLE) ? 21 : 0;
+            // QD-OLED (all gens): 0.5px H + ~0.33px V for triangular subpixel geometry.
+            // Standard RWBG/RGWB: 0.375px H, no V offset.
+            const FT_Pos oledPhaseX = isQdPanel ? 32 : 24;
+            const FT_Pos oledPhaseY = isQdPanel ? 21 : 0;
 
             FT_Vector phaseVec;
             // kPhaseStep = 21 FT units ≈ 64/3 aligns each phase to one subpixel center.
@@ -423,12 +455,30 @@ namespace puretype
         std::vector<PositionedGlyph> result;
         result.reserve(glyphCount);
 
+        // Bug 1 fix (part 2 of 2): per-run bitmap storage.
+        //
+        // RasterizeGlyph returns const GlyphBitmap* from a thread_local slot for
+        // cache hits. A single thread_local works for the DWrite path (each glyph
+        // is used immediately before the next call), but NOT here: this function
+        // accumulates pointers across N calls in a loop, and every cache hit for
+        // glyph[i] overwrites the same slot — all result[j<i].bitmap then alias
+        // the same address with stale data.
+        //
+        // Fix: copy each bitmap into a thread_local per-run storage vector that
+        // lives for the duration of this call. The caller (GDI hook) uses all
+        // pg.bitmap pointers synchronously before this function can be called
+        // again, so the storage remains valid throughout.
+        //
+        // Using thread_local avoids heap allocation per run. Cleared at the top
+        // of each call so stale entries from a previous run don't linger.
+        static thread_local std::vector<GlyphBitmap> tl_runStorage;
+        tl_runStorage.clear();
+        tl_runStorage.reserve(glyphCount);
+
         int currentX = 0;
 
         for (uint32_t i = 0; i < glyphCount; ++i)
         {
-            // NormalizePhase (% 3) is applied inside RasterizeGlyph, but we
-            // normalize here too for clarity and correct cache key computation.
             const uint8_t phaseX = fractionalPhaseX
                                        ? NormalizePhase(fractionalPhaseX[i])
                                        : 0;
@@ -438,22 +488,31 @@ namespace puretype
 
             const GlyphBitmap* bmp = RasterizeGlyph(
                 fontPath, glyphIndices[i], pixelSize, fontWeight, phaseX, phaseY);
-            if (!bmp) continue;
+            if (!bmp)
+            {
+                // Bug 6 fix: advance the cursor even when rasterization fails.
+                if (lpDx) currentX += lpDx[i] * 3;
+                continue;
+            }
+
+            // Copy the bitmap into per-run storage so each element has its own
+            // stable address that won't be overwritten by subsequent loop iterations.
+            tl_runStorage.push_back(*bmp);
+            const GlyphBitmap* stableBmp = &tl_runStorage.back();
 
             PositionedGlyph pg{};
-            pg.bitmap = bmp;
-            pg.offsetX = currentX + bmp->bearingX; // bearingX is unmodified FT value
+            pg.bitmap = stableBmp;
+            pg.offsetX = currentX + stableBmp->bearingX;
             pg.offsetY = 0;
             result.push_back(pg);
 
             if (lpDx)
             {
-                // GDI advances are in logical pixels; internal coords are in LCD sub-samples.
                 currentX += lpDx[i] * 3;
             }
             else
             {
-                currentX += bmp->advanceX;
+                currentX += stableBmp->advanceX;
             }
         }
 

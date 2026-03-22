@@ -299,8 +299,15 @@ namespace puretype::hooks
         const float linTextR = sRGBToLinear(GetRValue(textColor));
         const float linTextG = sRGBToLinear(GetGValue(textColor));
         const float linTextB = sRGBToLinear(GetBValue(textColor));
+        // sRGB text bytes used for mask extraction in sRGB space.
+        const float textR_s_const = static_cast<float>(GetRValue(textColor));
+        const float textG_s_const = static_cast<float>(GetGValue(textColor));
+        const float textB_s_const = static_cast<float>(GetBValue(textColor));
 
-        const bool qdPanel = (cfg.panelType == PanelType::QD_OLED_TRIANGLE);
+        const bool qdGen1 = (cfg.panelType == PanelType::QD_OLED_GEN1);
+        const bool qdGen3 = (cfg.panelType == PanelType::QD_OLED_GEN3);
+        const bool qdGen4 = (cfg.panelType == PanelType::QD_OLED_GEN4);
+        const bool qdPanel = qdGen1 || qdGen3 || qdGen4;
         const bool rgwbPanel = (cfg.panelType == PanelType::RGWB);
 
         // ToneMapper S-curve LUT -----------------------------------------------
@@ -335,8 +342,11 @@ namespace puretype::hooks
         else if (h <= 32) chromaKeep = qdPanel ? 0.80f : 0.82f;
         else chromaKeep = qdPanel ? 0.83f : 0.85f;
 
-        // Output buffer --------------------------------------------------------
-        std::vector<uint8_t> output(static_cast<size_t>(before.pitch) * h);
+        // Output buffer — zero-initialised: alpha=0 for all pixels by default.
+        // Text pixels receive alpha=255; background pixels stay at alpha=0.
+        // AlphaBlend(AC_SRC_ALPHA) below skips alpha=0 pixels entirely,
+        // leaving compositor content intact on composited DCs.
+        std::vector<uint8_t> output(static_cast<size_t>(before.pitch) * h, 0);
         bool anyModified = false;
 
         for (int row = 0; row < h; ++row)
@@ -350,85 +360,164 @@ namespace puretype::hooks
                 const uint8_t* bp = bRow + col * 4; // BGRA
                 const uint8_t* ap = aRow + col * 4;
 
-                // Default: keep whatever GDI wrote (background or opaque fill).
-                oRow[col * 4 + 0] = ap[0];
-                oRow[col * 4 + 1] = ap[1];
-                oRow[col * 4 + 2] = ap[2];
-                oRow[col * 4 + 3] = 0xFF;
-
-                // Only process pixels where ClearType blended text.
+                // Background pixel — stays at alpha=0, not written back.
                 if (ap[0] == bp[0] && ap[1] == bp[1] && ap[2] == bp[2]) continue;
                 anyModified = true;
 
-                // --- Step 1: background and ClearType output in linear light ---
-                const float bgB = sRGBToLinear(bp[0]);
-                const float bgG = sRGBToLinear(bp[1]);
-                const float bgR = sRGBToLinear(bp[2]);
-
-                const float ctB = sRGBToLinear(ap[0]);
-                const float ctG = sRGBToLinear(ap[1]);
-                const float ctR = sRGBToLinear(ap[2]);
+                // --- Step 1: background and ClearType output values -----------
+                // Keep sRGB bytes for mask extraction (Step 2).
+                // Linearise for the final blend (Step 6).
+                const float bgB_lin = sRGBToLinear(bp[0]);
+                const float bgG_lin = sRGBToLinear(bp[1]);
+                const float bgR_lin = sRGBToLinear(bp[2]);
 
                 // --- Step 2: extract per-channel subpixel coverage masks -------
-                // ClearType blends: ct_ch = bg*(1-m) + text*m  →  m = (ct-bg)/(text-bg)
+                //
+                // GDI ClearType composites in sRGB-encoded (gamma-compressed) space:
+                //
+                //   ct_byte = bg_byte × (1 − m) + text_byte × m
+                //   →  m = (ct_byte − bg_byte) / (text_byte − bg_byte)
+                //
+                // Solving in LINEAR light is wrong because the blending was not
+                // performed in linear light. For mid-coverage values where the sRGB
+                // gamma curve deviates most from linear, linearising before extraction
+                // over- or under-estimates m, producing systematic errors in the
+                // per-channel coverage that then propagate through the OLED remap.
+                //
+                // Correct approach: solve in sRGB integer space, then use the mask
+                // (which is a linear coverage fraction 0..1) for the final linear-light
+                // blend in Step 6. The mask itself is dimensionless — it does not carry
+                // a gamma encoding.
+                const float bgB_s = static_cast<float>(bp[0]);
+                const float bgG_s = static_cast<float>(bp[1]);
+                const float bgR_s = static_cast<float>(bp[2]);
+                const float ctB_s = static_cast<float>(ap[0]);
+                const float ctG_s = static_cast<float>(ap[1]);
+                const float ctR_s = static_cast<float>(ap[2]);
+                // sRGB text colour bytes (pre-computed once per call site below).
+                const float textB_s = textB_s_const;
+                const float textG_s = textG_s_const;
+                const float textR_s = textR_s_const;
+
                 auto extractMask = [](float ct, float bg, float text) -> float
                 {
                     const float d = text - bg;
-                    if (std::abs(d) < 0.001f) return 0.0f;
+                    // Use 0.5 as minimum delta to avoid division by near-zero
+                    // in sRGB integer space (values 0..255).
+                    if (std::abs(d) < 0.5f) return 0.0f;
                     return std::clamp((ct - bg) / d, 0.0f, 1.0f);
                 };
 
-                const float maskR = extractMask(ctR, bgR, linTextR);
-                const float maskG = extractMask(ctG, bgG, linTextG);
-                const float maskB = extractMask(ctB, bgB, linTextB);
+                const float maskR = extractMask(ctR_s, bgR_s, textR_s);
+                const float maskG = extractMask(ctG_s, bgG_s, textG_s);
+                const float maskB = extractMask(ctB_s, bgB_s, textB_s);
 
                 // --- Step 3: OLED channel reconstruction -----------------------
                 //
-                // ClearType subpixel centers (3 per pixel, RGB stripe):
-                //   R → 1/6  (0.167)   G → 3/6  (0.500)   B → 5/6  (0.833)
+                // ClearType subpixel centers (RGB stripe, 3 per pixel):
+                //   CT_R = 0.1667    CT_G = 0.5000    CT_B = 0.8333
+                //   CT span between adjacent samples = 0.3333
                 //
-                // WOLED RWBG subpixel centers (4 per pixel):
-                //   R → 1/8  (0.125)   W → 3/8  (0.375)   B → 5/8  (0.625)   G → 7/8 (0.875)
+                // Physical subpixel centers — MEASURED FROM PANEL MICROSCOPY:
                 //
-                // WOLED RGWB subpixel centers (4 per pixel):
-                //   R → 1/8            G → 3/8              W → 5/8             B → 7/8
+                // ── QD-OLED Gen 1-2 ────────────────────────────────────────────
+                //   Oval subpixels. R noticeably larger than B (luminance efficiency).
+                //   Asymmetric centers: R ≈ 0.280, G = 0.500, B ≈ 0.720
+                //   (AW3423DW, AW3423DWF, Odyssey G8 OLED 34" gen1)
                 //
-                // QD-OLED (triangular, 3 per pixel):
-                //   Approximately same as RGB stripe horizontally; use directly.
+                //   R at 0.280 → lerp(CT_R=0.167, CT_G=0.500):
+                //     wR = (0.500−0.280)/0.333 = 0.661 ≈ 0.66
+                //     wG = (0.280−0.167)/0.333 = 0.339 ≈ 0.34
+                //   G at 0.500 → exact CT_G. Use maskG.
+                //   B at 0.720 → lerp(CT_G=0.500, CT_B=0.833):
+                //     wG = (0.833−0.720)/0.333 = 0.339 ≈ 0.34
+                //     wB = (0.720−0.500)/0.333 = 0.661 ≈ 0.66
+                //
+                // ── QD-OLED Gen 3 ──────────────────────────────────────────────
+                //   Rectangular subpixels. R slightly wider than B but nearly equal.
+                //   Symmetric centers: R ≈ 0.250, G = 0.500, B ≈ 0.750
+                //   (Odyssey G8 OLED 27" QHD, Dell AW2725DF, 32" 4K models)
+                //
+                //   R at 0.250 → lerp(CT_R, CT_G): wR=0.750, wG=0.250
+                //   G at 0.500 → exact CT_G. Use maskG.
+                //   B at 0.750 → lerp(CT_G, CT_B): wG=0.250, wB=0.750
+                //
+                // ── QD-OLED Gen 4 ──────────────────────────────────────────────
+                //   Rectangular subpixels. R ≈ B near-equal width.
+                //   Symmetric centers: R ≈ 0.250, G = 0.500, B ≈ 0.750
+                //   (MSI MPG 272URX, 27" 4K UHD models 2024-2025)
+                //   Same geometry as Gen 3 — weights identical; kept separate
+                //   for future per-generation tuning if needed.
+                //
+                // ── WOLED RWBG ─────────────────────────────────────────────────
+                //   W ≈ 40% pixel width, R=B=G ≈ 20% each (measured from image).
+                //   Centers: R=0.100, W=0.400, B=0.700, G=0.900
+                //
+                //   R at 0.100 → CT_R nearest. maskR. Δ=0.067
+                //   W at 0.400 → lerp(CT_R, CT_G): wR=0.300, wG=0.700
+                //   B at 0.700 → lerp(CT_G, CT_B): wG=0.400, wB=0.600
+                //   G at 0.900 → CT_B nearest. maskB. Δ=0.067
+                //
+                // ── WOLED RGWB ─────────────────────────────────────────────────
+                //   Same physical panel as RWBG, different order.
+                //   Centers: R=0.100, G=0.300, W=0.600, B=0.900
+                //
+                //   R at 0.100 → maskR. Δ=0.067
+                //   G at 0.300 → lerp(CT_R, CT_G): wR=0.600, wG=0.400
+                //   W at 0.600 → lerp(CT_G, CT_B): wG=0.700, wB=0.300
+                //   B at 0.900 → maskB. Δ=0.067
 
                 float finalCovR, finalCovG, finalCovB;
 
-                if (qdPanel)
+                if (qdGen1)
                 {
-                    // QD-OLED: reuse ClearType masks directly for horizontal coverage.
-                    finalCovR = maskR;
+                    // Gen 1-2: asymmetric R/B (R larger, shifted left; B smaller, shifted right)
+                    // R at 0.280: wR=0.66, wG=0.34
+                    // G at 0.500: exact
+                    // B at 0.720: wG=0.34, wB=0.66
+                    finalCovR = maskR * 0.66f + maskG * 0.34f;
                     finalCovG = maskG;
-                    finalCovB = maskB;
+                    finalCovB = maskG * 0.34f + maskB * 0.66f;
+                }
+                else if (qdGen3)
+                {
+                    // Gen 3: rectangular, nearly symmetric
+                    // R at 0.250: wR=0.75, wG=0.25
+                    // G at 0.500: exact
+                    // B at 0.750: wG=0.25, wB=0.75
+                    finalCovR = maskR * 0.75f + maskG * 0.25f;
+                    finalCovG = maskG;
+                    finalCovB = maskG * 0.25f + maskB * 0.75f;
+                }
+                else if (qdGen4)
+                {
+                    // Gen 4: rectangular, R ≈ B equal — same center positions as gen3
+                    // R at 0.250: wR=0.75, wG=0.25
+                    // G at 0.500: exact
+                    // B at 0.750: wG=0.25, wB=0.75
+                    finalCovR = maskR * 0.75f + maskG * 0.25f;
+                    finalCovG = maskG;
+                    finalCovB = maskG * 0.25f + maskB * 0.75f;
                 }
                 else if (rgwbPanel)
                 {
-                    // RGWB: order R(1/8), G(3/8), W(5/8), B(7/8)
-                    //   WOLED R ← CT_R   (1/8 ≈ 1/6)
-                    //   WOLED G ← CT_G   (3/8 ≈ 3/6, closest)
-                    //   WOLED W ← CT_B   (5/8 ≈ 5/6, closest) * (1-crossTalk)
-                    //   WOLED B ← CT_B   (7/8 ≈ 5/6, also closest)
-                    //   W drives all channels via TCON max().
-                    const float alpha_W = maskB * (1.0f - cfg.woledCrossTalkReduction);
-                    finalCovR = std::max(maskR, alpha_W);
-                    finalCovG = std::max(maskG, alpha_W);
-                    finalCovB = std::max(maskB, alpha_W);
+                    // RGWB: measured centers R=0.100, G=0.300, W=0.600, B=0.900
+                    const float alpha_R = maskR;
+                    const float alpha_G = maskR * 0.60f + maskG * 0.40f;
+                    const float alpha_W = (maskG * 0.70f + maskB * 0.30f)
+                        * (1.0f - cfg.woledCrossTalkReduction);
+                    const float alpha_B = maskB;
+                    finalCovR = std::max(alpha_R, alpha_W);
+                    finalCovG = std::max(alpha_G, alpha_W);
+                    finalCovB = std::max(alpha_B, alpha_W);
                 }
                 else
                 {
-                    // RWBG (default): order R(1/8), W(3/8), B(5/8), G(7/8)
-                    //   WOLED R ← CT_R              (1/6 ≈ 1/8)
-                    //   WOLED W ← CT_G * (1-xTalk)  (3/6 ≈ 3/8)
-                    //   WOLED B ← avg(CT_G, CT_B)   (5/8 lies between CT_G and CT_B centers)
-                    //   WOLED G ← CT_B              (5/6 ≈ 7/8)
-                    //   W drives all channels via TCON max().
+                    // RWBG (default): measured centers R=0.100, W=0.400, B=0.700, G=0.900
                     const float alpha_R = maskR;
-                    const float alpha_W = maskG * (1.0f - cfg.woledCrossTalkReduction);
-                    const float alpha_B = (maskG + maskB) * 0.5f;
+                    const float alpha_W = (maskR * 0.30f + maskG * 0.70f)
+                        * (1.0f - cfg.woledCrossTalkReduction);
+                    const float alpha_B = maskG * 0.40f + maskB * 0.60f;
                     const float alpha_G = maskB;
                     finalCovR = std::max(alpha_R, alpha_W);
                     finalCovG = std::max(alpha_G, alpha_W);
@@ -449,9 +538,12 @@ namespace puretype::hooks
                 finalCovB = scurve(finalCovB);
 
                 // --- Step 6: final per-channel blend  bg → textColor ----------
-                const float outR = bgR * (1.0f - finalCovR) + linTextR * finalCovR;
-                const float outG = bgG * (1.0f - finalCovG) + linTextG * finalCovG;
-                const float outB = bgB * (1.0f - finalCovB) + linTextB * finalCovB;
+                // Background is in linear light (bgR_lin etc.).
+                // Coverage masks are dimensionless [0,1] — no gamma.
+                // Text colour is in linear light (linTextR etc.).
+                const float outR = bgR_lin * (1.0f - finalCovR) + linTextR * finalCovR;
+                const float outG = bgG_lin * (1.0f - finalCovG) + linTextG * finalCovG;
+                const float outB = bgB_lin * (1.0f - finalCovB) + linTextB * finalCovB;
 
                 oRow[col * 4 + 0] = linearToSRGB(outB);
                 oRow[col * 4 + 1] = linearToSRGB(outG);
@@ -485,7 +577,17 @@ namespace puretype::hooks
         std::memcpy(dibBits, output.data(), output.size());
 
         HGDIOBJ old = SelectObject(memDC, hBitmap);
-        BitBlt(hdc, before.x, before.y, w, h, memDC, 0, 0, SRCCOPY);
+
+        // AlphaBlend(AC_SRC_ALPHA): alpha=0 pixels leave destination untouched,
+        // alpha=255 pixels are replaced with our OLED-correct values.
+        // This prevents writing opaque black over compositor content on composited DCs.
+        BLENDFUNCTION blend = {};
+        blend.BlendOp = AC_SRC_OVER;
+        blend.BlendFlags = 0;
+        blend.SourceConstantAlpha = 255;
+        blend.AlphaFormat = AC_SRC_ALPHA;
+        AlphaBlend(hdc, before.x, before.y, w, h, memDC, 0, 0, w, h, blend);
+
         SelectObject(memDC, old);
         DeleteObject(hBitmap);
         DeleteDC(memDC);
@@ -555,31 +657,19 @@ namespace puretype::hooks
             return g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
         }
 
-        // Step 3 — force ClearType on the DC for this call, then let GDI render.
-        //
-        // ForceSubpixelRender temporarily replaces the font on the DC with a
-        // ClearType-quality clone of itself. This ensures GDI always produces
-        // per-channel R/G/B subpixel output — regardless of whether the user has
-        // ClearType enabled system-wide or whether the app requested grayscale AA.
-        //
-        // The clone has the SAME face name, size, weight and style as the original;
-        // only lfQuality changes. GDI metrics (advance widths, bearings, text
-        // extent) are identical for both qualities, so Qt/MFC/WPF bounding boxes
-        // computed before this hook fired remain valid.
-        //
-        // The RAII destructor restores the original font and deletes the clone
-        // before this function returns, on every code path.
+        // Step 3 — force ClearType, let GDI render with original options.
+        // ETO_OPAQUE is passed through unchanged — GDI handles the background fill.
+        // The AlphaBlend writeback (alpha=0 for background pixels) means we never
+        // overwrite compositor content regardless of what GDI puts in those pixels.
         {
             ForceSubpixelRender ctGuard(hdc);
 
-            BOOL result = g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
+            BOOL result = g_OrigExtTextOutW(hdc, x, y, options,
+                                            lprc, lpString, cbCount, lpDx);
 
             // Step 4 — capture AFTER (ClearType subpixel data now present).
             PixelCapture after = CaptureRegion(hdc, bounds.left, bounds.top,
                                                captureW, captureH);
-
-            // ctGuard destructor fires here — original font is back on the DC
-            // before we write any pixels, so subsequent GDI calls are unaffected.
 
             if (after.IsValid())
             {

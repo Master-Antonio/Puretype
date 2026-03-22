@@ -43,6 +43,12 @@ namespace puretype
             uint16_t lodSmallQ = 0;
             uint16_t lodLargeQ = 0;
             uint16_t crossTalkQ = 0;
+            // Bug 9 fix: lumaContrastStrength affects the ToneMapper S-curve applied
+            // after filtering. Without this field, cached bitmaps built with one
+            // contrast value would be returned unchanged after a .ini reload that
+            // changes lumaContrastStrength. Field added here for correctness when
+            // hot-reload support is added; has no runtime cost at present.
+            uint16_t lumaContrastQ = 0;
 
             bool operator==(const FilterCacheKey& o) const
             {
@@ -59,7 +65,8 @@ namespace puretype
                     stemQ == o.stemQ &&
                     lodSmallQ == o.lodSmallQ &&
                     lodLargeQ == o.lodLargeQ &&
-                    crossTalkQ == o.crossTalkQ;
+                    crossTalkQ == o.crossTalkQ &&
+                    lumaContrastQ == o.lumaContrastQ;
             }
         };
 
@@ -81,6 +88,7 @@ namespace puretype
                 h ^= std::hash<uint16_t>{}(k.lodSmallQ) + 0x9e3779b9 + (h << 6) + (h >> 2);
                 h ^= std::hash<uint16_t>{}(k.lodLargeQ) + 0x9e3779b9 + (h << 6) + (h >> 2);
                 h ^= std::hash<uint16_t>{}(k.crossTalkQ) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                h ^= std::hash<uint16_t>{}(k.lumaContrastQ) + 0x9e3779b9 + (h << 6) + (h >> 2);
                 return h;
             }
         };
@@ -163,13 +171,21 @@ namespace puretype
             key.lodSmallQ = QuantizeFloat(cfg.lodThresholdSmall, 64.0f);
             key.lodLargeQ = QuantizeFloat(cfg.lodThresholdLarge, 64.0f);
             key.crossTalkQ = QuantizeFloat(cfg.woledCrossTalkReduction, 4096.0f);
+            key.lumaContrastQ = QuantizeFloat(cfg.lumaContrastStrength, 1024.0f);
             return key;
         }
     } // namespace
 
     std::unique_ptr<SubpixelFilter> SubpixelFilter::Create(int panelType)
     {
-        if (panelType == static_cast<int>(PanelType::QD_OLED_TRIANGLE))
+        // All three QD-OLED generations use the TriangularFilter.
+        // The per-generation subpixel center differences (R/B asymmetry in gen1,
+        // symmetric in gen3-4) are handled in RemapToOLED in gdi_hooks.cpp,
+        // which operates on the final pixel output after filtering.
+        // The filter itself only needs to know it's a triangular layout.
+        if (panelType == static_cast<int>(PanelType::QD_OLED_GEN1) ||
+            panelType == static_cast<int>(PanelType::QD_OLED_GEN3) ||
+            panelType == static_cast<int>(PanelType::QD_OLED_GEN4))
             return std::make_unique<TriangularFilter>();
         return std::make_unique<WOLEDFilter>();
     }
@@ -178,7 +194,16 @@ namespace puretype
     {
         const int x0 = std::clamp(static_cast<int>(fx), 0, width3x - 1);
         const int x1 = std::clamp(x0 + 1, 0, width3x - 1);
-        const float t = fx - static_cast<float>(x0);
+        // Bug 4 fix: clamp t to [0, 1].
+        //
+        // When fx is negative (e.g. TriangularFilter kAdjShift = -1.5 applied to
+        // the first slot of the first pixel), static_cast<int>(fx) truncates toward
+        // zero: int(-1.0) = -1, clamped to x0 = 0. The fractional part
+        // fx - x0 = -1.0 - 0 = -1.0 is then negative, making the blend weight
+        // (1 - t) = 2.0 and t = -1.0 — extrapolation, not interpolation.
+        // This produces out-of-range linear values on the left edge of every glyph.
+        // Clamping t to [0, 1] ensures we always interpolate, never extrapolate.
+        const float t = std::clamp(fx - static_cast<float>(x0), 0.0f, 1.0f);
         return sRGBToLinear(row[x0]) * (1.0f - t) + sRGBToLinear(row[x1]) * t;
     }
 
@@ -213,10 +238,15 @@ namespace puretype
         constexpr int FILTER_TAPS = 3;
         constexpr int FILTER_CENTER = 1; // offset for i - center
 
+        // Pre-allocate the per-row coverage buffer outside the row loop.
+        // Previously allocated inside the loop, causing one heap allocation and
+        // deallocation per row (up to ~200 per glyph at 200px). Single allocation
+        // reused across all rows.
+        std::vector<float> cov4X(pixelWidth * 4);
+
         for (int y = 0; y < height; ++y)
         {
             const uint8_t* row0 = glyph.data.data() + y * glyph.pitch;
-            std::vector<float> cov4X(pixelWidth * 4);
 
             for (int px = 0; px < pixelWidth; ++px)
             {
@@ -331,11 +361,12 @@ namespace puretype
             1.0f / 9.0f, 2.0f / 9.0f, 3.0f / 9.0f, 2.0f / 9.0f, 1.0f / 9.0f
         };
 
+        // Pre-allocate coverage buffer outside the row loop (same as WOLEDFilter).
+        std::vector<float> cov3X(pixelWidth * 3);
+
         for (int y = 0; y < height; ++y)
         {
             const uint8_t* row0 = glyph.data.data() + y * glyph.pitch;
-
-            // Model QD-OLED triangular subpixel geometry.
             //
             // In Samsung QD-OLED (AW3423DW, Odyssey G8 etc.) the RGB subpixels
             // are arranged in triangles. Even and odd physical rows are
@@ -362,8 +393,6 @@ namespace puretype
             // -1.5 for odd  rows (adjacent row is shifted left).
             const float kAdjShift = (y % 2 == 0) ? +1.5f : -1.5f;
             constexpr float kVertBlend = 0.25f; // 25% from adjacent row
-
-            std::vector<float> cov3X(pixelWidth * 3);
 
             for (int px = 0; px < pixelWidth; ++px)
             {

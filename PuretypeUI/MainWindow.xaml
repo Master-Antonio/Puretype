@@ -482,7 +482,9 @@
                                                   SelectionChanged="Setting_Changed_Combo">
                                             <ComboBoxItem Content="LG WOLED  ·  RWBG stripe" Tag="rwbg" IsSelected="True"/>
                                             <ComboBoxItem Content="LG WOLED  ·  RGWB stripe" Tag="rgwb"/>
-                                            <ComboBoxItem Content="Samsung QD-OLED  ·  Triangle" Tag="qd_oled_triangle"/>
+                                            <ComboBoxItem Content="Samsung QD-OLED Gen 1-2  ·  Triangle" Tag="qd_oled_gen1"/>
+                                            <ComboBoxItem Content="Samsung QD-OLED Gen 3  ·  Rectangle" Tag="qd_oled_gen3"/>
+                                            <ComboBoxItem Content="Samsung QD-OLED Gen 4  ·  Rectangle" Tag="qd_oled_gen4"/>
                                         </ComboBox>
 
                                         <!-- Filter strength -->

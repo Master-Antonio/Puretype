@@ -113,3 +113,7 @@ add_custom_command(TARGET PureType POST_BUILD
         $<TARGET_FILE_DIR:PureType>/puretype.ico
         COMMENT "Copying puretype.ini and puretype.ico to output directory"
 )
+
+set_target_properties(PureType PROPERTIES
+        ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/build_artifacts"
+)

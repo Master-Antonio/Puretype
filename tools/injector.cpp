@@ -29,9 +29,11 @@ static const UINT WM_PURETYPE_RELOAD = WM_APP + 2;
 
 static const UINT IDM_ENABLE = 1001;
 static const UINT IDM_DISABLE = 1002;
-static const UINT IDM_PANEL_QDOLED = 1010;
+static const UINT IDM_PANEL_QDOLED_GEN1 = 1010;
 static const UINT IDM_PANEL_RWBG = 1011;
 static const UINT IDM_PANEL_RGWB = 1012;
+static const UINT IDM_PANEL_QDOLED_GEN3 = 1013;
+static const UINT IDM_PANEL_QDOLED_GEN4 = 1014;
 static const UINT IDM_SETTINGS = 1005;
 static const UINT IDM_EXIT = 1099;
 
@@ -68,21 +70,25 @@ static void LoadPanelTypeFromIni()
     std::wstring val(buf);
 
     for (auto& c : val) c = towupper(c);
-    if (val == L"QD_OLED_TRIANGLE")
-    {
-        g_panelType = 0;
-    }
-    else if (val == L"RWBG")
-    {
-        g_panelType = 1;
-    }
-    else if (val == L"RGWB")
+    if (val == L"QD_OLED_TRIANGLE" || val == L"QD_OLED_GEN1")
     {
         g_panelType = 2;
     }
-    else
+    else if (val == L"QD_OLED_GEN3")
+    {
+        g_panelType = 3;
+    }
+    else if (val == L"QD_OLED_GEN4")
+    {
+        g_panelType = 4;
+    }
+    else if (val == L"RGWB")
     {
         g_panelType = 1;
+    }
+    else
+    {
+        g_panelType = 0;
     }
 }
 
@@ -125,8 +131,10 @@ static void SavePanelTypeToIni(int panelType)
 {
     std::wstring iniPath = GetIniPath();
     const wchar_t* value = L"RWBG";
-    if (panelType == 0) value = L"QD_OLED_TRIANGLE";
-    else if (panelType == 2) value = L"RGWB";
+    if (panelType == 1) value = L"RGWB";
+    else if (panelType == 2) value = L"QD_OLED_GEN1";
+    else if (panelType == 3) value = L"QD_OLED_GEN3";
+    else if (panelType == 4) value = L"QD_OLED_GEN4";
 
     WritePrivateProfileStringW(L"General", L"PanelType", value, iniPath.c_str());
     g_panelType = panelType;
@@ -376,11 +384,15 @@ static void ShowTrayMenu(HWND hWnd)
 
     HMENU hPanelMenu = CreatePopupMenu();
     AppendMenuW(hPanelMenu, MF_STRING | (g_panelType == 0 ? MF_CHECKED : 0),
-                IDM_PANEL_QDOLED, L"Samsung QD-OLED (Triangular)");
-    AppendMenuW(hPanelMenu, MF_STRING | (g_panelType == 1 ? MF_CHECKED : 0),
                 IDM_PANEL_RWBG, L"LG WOLED (RWBG)");
-    AppendMenuW(hPanelMenu, MF_STRING | (g_panelType == 2 ? MF_CHECKED : 0),
+    AppendMenuW(hPanelMenu, MF_STRING | (g_panelType == 1 ? MF_CHECKED : 0),
                 IDM_PANEL_RGWB, L"LG WOLED (RGWB)");
+    AppendMenuW(hPanelMenu, MF_STRING | (g_panelType == 2 ? MF_CHECKED : 0),
+                IDM_PANEL_QDOLED_GEN1, L"Samsung QD-OLED Gen 1-2");
+    AppendMenuW(hPanelMenu, MF_STRING | (g_panelType == 3 ? MF_CHECKED : 0),
+                IDM_PANEL_QDOLED_GEN3, L"Samsung QD-OLED Gen 3");
+    AppendMenuW(hPanelMenu, MF_STRING | (g_panelType == 4 ? MF_CHECKED : 0),
+                IDM_PANEL_QDOLED_GEN4, L"Samsung QD-OLED Gen 4");
 
     AppendMenuW(hMenu, MF_POPUP, reinterpret_cast<UINT_PTR>(hPanelMenu),
                 L"Panel Type");
@@ -479,7 +491,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         case IDM_DISABLE:
             DisableHook();
             break;
-        case IDM_PANEL_QDOLED:
+        case IDM_PANEL_RWBG:
             SavePanelTypeToIni(0);
             if (g_hookActive)
             {
@@ -487,7 +499,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 EnableHook();
             }
             break;
-        case IDM_PANEL_RWBG:
+        case IDM_PANEL_RGWB:
             SavePanelTypeToIni(1);
             if (g_hookActive)
             {
@@ -495,8 +507,24 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 EnableHook();
             }
             break;
-        case IDM_PANEL_RGWB:
+        case IDM_PANEL_QDOLED_GEN1:
             SavePanelTypeToIni(2);
+            if (g_hookActive)
+            {
+                DisableHook();
+                EnableHook();
+            }
+            break;
+        case IDM_PANEL_QDOLED_GEN3:
+            SavePanelTypeToIni(3);
+            if (g_hookActive)
+            {
+                DisableHook();
+                EnableHook();
+            }
+            break;
+        case IDM_PANEL_QDOLED_GEN4:
+            SavePanelTypeToIni(4);
             if (g_hookActive)
             {
                 DisableHook();
