@@ -2,8 +2,9 @@
 name: Panel compatibility
 about: New panel type, subpixel measurement, or calibration data for an existing panel
 title: "[PANEL] "
-labels: panel-data
+labels: ''
 assignees: ''
+
 ---
 
 ## Panel information

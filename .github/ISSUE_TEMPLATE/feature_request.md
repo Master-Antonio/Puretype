@@ -4,6 +4,7 @@ about: New panel support, rendering improvement, configuration option or other e
 title: "[FEATURE] "
 labels: enhancement
 assignees: ''
+
 ---
 
 ## Summary

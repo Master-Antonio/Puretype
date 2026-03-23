@@ -4,6 +4,7 @@ about: Text rendering issue, visual artifact, crash or unexpected behaviour
 title: "[BUG] "
 labels: bug
 assignees: ''
+
 ---
 
 ## Description
