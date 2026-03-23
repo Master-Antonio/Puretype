@@ -288,7 +288,9 @@ namespace puretype::hooks
                             const PixelCapture& before,
                             const PixelCapture& after,
                             COLORREF textColor,
-                            const ConfigData& cfg)
+                            const ConfigData& cfg,
+                            bool opaqueBackground,  // ETO_OPAQUE was set (GDI filled background)
+                            bool isComposited)      // DC belongs to a composited/layered window
     {
         if (!before.IsValid() || !after.IsValid()) return;
         if (before.width != after.width || before.height != after.height) return;
@@ -343,9 +345,24 @@ namespace puretype::hooks
         else chromaKeep = qdPanel ? 0.83f : 0.85f;
 
         // Output buffer — zero-initialised: alpha=0 for all pixels by default.
-        // Text pixels receive alpha=255; background pixels stay at alpha=0.
-        // AlphaBlend(AC_SRC_ALPHA) below skips alpha=0 pixels entirely,
-        // leaving compositor content intact on composited DCs.
+        //
+        // Per-pixel alpha strategy:
+        //   alpha = 0   → AlphaBlend skips this pixel (compositor content intact)
+        //   alpha = 255 → pixel is replaced with our value
+        //
+        // Three categories of changed pixels:
+        //   A) before == after: nothing changed → keep alpha=0, skip
+        //      Exception: ETO_OPAQUE background fill on non-composited DC → write ap, alpha=255
+        //
+        //   B) before != after, masks all ≈ 0: mask extraction failed.
+        //      This happens when:
+        //        - GetTextColor() returns wrong color (e.g., some dialog controls)
+        //        - ETO_OPAQUE fill went in the opposite direction from textColor
+        //          (old text area overwritten with background fill — "ghost chars" in Notepad)
+        //      Fix: write GDI output (ap) directly on non-composited DCs.
+        //      On composited DCs keep alpha=0 — writing ap could overwrite compositor content.
+        //
+        //   C) before != after, masks > threshold: normal text pixel → OLED remap, alpha=255
         std::vector<uint8_t> output(static_cast<size_t>(before.pitch) * h, 0);
         bool anyModified = false;
 
@@ -360,8 +377,30 @@ namespace puretype::hooks
                 const uint8_t* bp = bRow + col * 4; // BGRA
                 const uint8_t* ap = aRow + col * 4;
 
-                // Background pixel — stays at alpha=0, not written back.
-                if (ap[0] == bp[0] && ap[1] == bp[1] && ap[2] == bp[2]) continue;
+                // Category A: pixel unchanged between before and after.
+                if (ap[0] == bp[0] && ap[1] == bp[1] && ap[2] == bp[2])
+                {
+                    // On non-composited DCs with ETO_OPAQUE: GDI filled the background.
+                    // We must write this fill so previous content (e.g., old text that
+                    // was in "before") gets properly erased. Without this, AlphaBlend
+                    // leaves old text pixels visible when the fill colour matches the
+                    // new background exactly (ghost chars in Notepad after deletion).
+                    //
+                    // On composited DCs: the "before" reads as zeros from the compositor
+                    // buffer; we MUST NOT write unchanged pixels or we'll overwrite the
+                    // wallpaper / compositor content with opaque fills.
+                    if (opaqueBackground && !isComposited)
+                    {
+                        oRow[col * 4 + 0] = ap[0];
+                        oRow[col * 4 + 1] = ap[1];
+                        oRow[col * 4 + 2] = ap[2];
+                        oRow[col * 4 + 3] = 0xFF;
+                        anyModified = true;
+                    }
+                    continue;
+                }
+
+                // Pixel changed — we will write something.
                 anyModified = true;
 
                 // --- Step 1: background and ClearType output values -----------
@@ -411,6 +450,41 @@ namespace puretype::hooks
                 const float maskR = extractMask(ctR_s, bgR_s, textR_s);
                 const float maskG = extractMask(ctG_s, bgG_s, textG_s);
                 const float maskB = extractMask(ctB_s, bgB_s, textB_s);
+
+                // Category B: mask extraction produced near-zero results for a changed pixel.
+                //
+                // This occurs in two situations:
+                //
+                //   1. GetTextColor() mismatch — the control drew with a different colour than
+                //      GetTextColor() reports (e.g., read-only URL controls in Property dialogs
+                //      that set textColor independently of the DC text colour attribute).
+                //      Result without fix: all masks=0 → out = old_bg → text rendered in bg
+                //      colour → invisible ("testo bianco su sfondo bianco").
+                //
+                //   2. ETO_OPAQUE fill reversed direction — when Notepad deletes text, GDI
+                //      calls ETO_OPAQUE to fill the line with white. The old text pixel ("before"
+                //      = dark gray) and the fill ("after" = white) differ, so we enter the remap
+                //      path. But textColor = black → expected direction is bg→black, actual is
+                //      bg→white (opposite) → extractMask gives negative values, clamped to 0.
+                //      Result without fix: masks=0 → out = old_gray → ghost chars.
+                //
+                // Fix: write GDI output (ap) directly. On non-composited DCs this is safe and
+                // produces correct output. On composited DCs (desktop icon labels) we keep
+                // alpha=0 — writing ap when "before" reads as compositor zeros could produce
+                // opaque fills over the wallpaper.
+                const float totalMask = std::max({maskR, maskG, maskB});
+                if (totalMask < 0.02f)
+                {
+                    if (!isComposited)
+                    {
+                        oRow[col * 4 + 0] = ap[0];
+                        oRow[col * 4 + 1] = ap[1];
+                        oRow[col * 4 + 2] = ap[2];
+                        oRow[col * 4 + 3] = 0xFF;
+                    }
+                    // else: composited DC — keep alpha=0, safer than writing garbage
+                    continue;
+                }
 
                 // --- Step 3: OLED channel reconstruction -----------------------
                 //
@@ -674,7 +748,27 @@ namespace puretype::hooks
             if (after.IsValid())
             {
                 const COLORREF textColor = GetTextColor(hdc);
-                RemapToOLED(hdc, before, after, textColor, cfg);
+
+                // Detect composited/layered window — determines how background pixels are handled.
+                //
+                // Composited DCs (desktop icon labels, WS_EX_COMPOSITED/LAYERED windows):
+                //   BitBlt reads zeros for transparent compositor areas → "before" is artificially
+                //   black. We must NOT write unchanged pixels or mask-zero pixels back, otherwise
+                //   we overwrite the compositor content with opaque fills (black box bug).
+                //
+                // Non-composited DCs (Notepad, dialogs, normal Win32 windows):
+                //   "before" is the real previous content. Writing back GDI output for fill
+                //   pixels (ETO_OPAQUE) and mask-zero pixels is correct and necessary.
+                bool isComposited = false;
+                if (const HWND hwnd = WindowFromDC(hdc))
+                {
+                    const LONG_PTR exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+                    isComposited = ((exStyle & WS_EX_COMPOSITED) || (exStyle & WS_EX_LAYERED));
+                }
+
+                const bool opaqueBackground = (options & ETO_OPAQUE) && (lprc != nullptr);
+
+                RemapToOLED(hdc, before, after, textColor, cfg, opaqueBackground, isComposited);
             }
 
             g_insideHook = false;
