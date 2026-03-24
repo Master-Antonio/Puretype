@@ -11,6 +11,7 @@ extern "C" __declspec(dllexport) bool GeneratePreview(
     uint32_t fontSize,
     float filterStrength,
     float gamma,
+    int gammaMode,
     float lumaContrastStrength,
     float woledCrossTalkReduction,
     bool enableSubpixelHinting,
@@ -33,6 +34,7 @@ extern "C" __declspec(dllexport) bool GeneratePreview(
     cfg.panelType = static_cast<PanelType>(panelType);
     cfg.filterStrength = filterStrength;
     cfg.gamma = gamma;
+    cfg.gammaMode = static_cast<GammaMode>(gammaMode);
     cfg.lumaContrastStrength = lumaContrastStrength;
     cfg.woledCrossTalkReduction = woledCrossTalkReduction;
     cfg.enableSubpixelHinting = enableSubpixelHinting;

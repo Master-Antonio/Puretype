@@ -429,7 +429,7 @@
                         </StackPanel>
                         <Border Background="#07192A" BorderBrush="#00D8FF" BorderThickness="1"
                                 CornerRadius="4" Padding="8,3" Margin="14,0,0,0" VerticalAlignment="Center">
-                            <TextBlock Text="v0.0.61" FontFamily="Consolas, Courier New"
+                            <TextBlock Text="v0.0.7" FontFamily="Consolas, Courier New"
                                        FontSize="11" Foreground="#00D8FF" FontWeight="Bold"/>
                         </Border>
                     </StackPanel>
@@ -476,9 +476,22 @@
                                 <Border Background="#0A0A18" BorderBrush="#16162A" BorderThickness="1" CornerRadius="8" Padding="16,14">
                                     <StackPanel>
                                         <!-- Panel type -->
-                                        <TextBlock Text="Display panel type" FontFamily="Segoe UI Variable Display, Segoe UI"
-                                                   FontSize="13" Foreground="#9098BC" Margin="0,0,0,6"/>
-                                        <ComboBox x:Name="PanelTypeCombo" Style="{StaticResource CB}"
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*"/>
+                                                <ColumnDefinition Width="Auto"/>
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="Display panel type" FontFamily="Segoe UI Variable Display, Segoe UI"
+                                                       FontSize="13" Foreground="#9098BC" VerticalAlignment="Center"/>
+                                            <Button Grid.Column="1" Style="{StaticResource GhostBtn}" Padding="8,2"
+                                                    Click="ApplyRecommended_Click" ToolTip="Apply the best settings for this specific panel">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="✦" Foreground="#00D8FF" FontSize="14" Margin="0,0,4,0"/>
+                                                    <TextBlock Text="Apply recommended" FontSize="11" VerticalAlignment="Center"/>
+                                                </StackPanel>
+                                            </Button>
+                                        </Grid>
+                                        <ComboBox x:Name="PanelTypeCombo" Style="{StaticResource CB}" Margin="0,6,0,0"
                                                   SelectionChanged="Setting_Changed_Combo">
                                             <ComboBoxItem Content="LG WOLED  ·  RWBG stripe" Tag="rwbg" IsSelected="True"/>
                                             <ComboBoxItem Content="LG WOLED  ·  RGWB stripe" Tag="rgwb"/>
@@ -531,6 +544,15 @@
                                                 Margin="0,8,0,14"
                                                 TickFrequency="0.05" IsSnapToTickEnabled="True"
                                                 ValueChanged="Setting_Changed_Slider"/>
+
+                                        <!-- Gamma Mode -->
+                                        <TextBlock Text="Gamma mode" FontFamily="Segoe UI Variable Display, Segoe UI"
+                                                   FontSize="13" Foreground="#9098BC" Margin="0,0,0,6"/>
+                                        <ComboBox x:Name="GammaModeCombo" Style="{StaticResource CB}"
+                                                  SelectionChanged="Setting_Changed_Combo" Margin="0,0,0,14">
+                                            <ComboBoxItem Content="sRGB (Standard monitors)" Tag="srgb" IsSelected="True"/>
+                                            <ComboBoxItem Content="OLED (Softer shadow response)" Tag="oled"/>
+                                        </ComboBox>
 
                                         <!-- Subpixel hinting -->
                                         <CheckBox x:Name="SubpixelHintingCheck" Style="{StaticResource CK}"
@@ -628,10 +650,46 @@
                             <StackPanel Margin="0,0,0,18">
                                 <StackPanel Orientation="Horizontal" Margin="0,0,0,10">
                                     <Rectangle Width="3" Height="10" RadiusX="1.5" RadiusY="1.5" Fill="#00D8FF" VerticalAlignment="Center" Margin="0,0,8,0"/>
-                                    <TextBlock Text="LOD THRESHOLDS" FontFamily="Consolas, Courier New" FontSize="11" FontWeight="Bold" Foreground="#7A82B0" VerticalAlignment="Center"/>
+                                    <TextBlock Text="SCALING &amp; LOD" FontFamily="Consolas, Courier New" FontSize="11" FontWeight="Bold" Foreground="#7A82B0" VerticalAlignment="Center"/>
                                 </StackPanel>
                                 <Border Background="#0A0A18" BorderBrush="#16162A" BorderThickness="1" CornerRadius="8" Padding="16,14">
                                     <StackPanel>
+                                        <!-- DPI Scalers -->
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="High DPI fade-out start" FontFamily="Segoe UI Variable Display, Segoe UI" FontSize="13" Foreground="#9098BC"/>
+                                                <TextBlock Text="Filtering starts fading above this DPI" FontFamily="Consolas, Courier New" FontSize="11" Foreground="#545478" Margin="0,2,0,0"/>
+                                            </StackPanel>
+                                            <Border Grid.Column="1" Background="#06182A" BorderBrush="#0A2A40" BorderThickness="1" CornerRadius="4" Padding="8,3" VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding Value, ElementName=HighDpiLowSlider, StringFormat={}{0:F0} DPI}"
+                                                           FontFamily="Consolas, Courier New" FontSize="12" Foreground="#00D8FF" FontWeight="Bold"/>
+                                            </Border>
+                                        </Grid>
+                                        <Slider x:Name="HighDpiLowSlider" Style="{StaticResource S}"
+                                                Minimum="96" Maximum="192" Value="144"
+                                                Margin="0,8,0,14"
+                                                TickFrequency="1" IsSnapToTickEnabled="True"
+                                                ValueChanged="DpiLow_Changed"/>
+
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Text="High DPI fade-out end" FontFamily="Segoe UI Variable Display, Segoe UI" FontSize="13" Foreground="#9098BC"/>
+                                                <TextBlock Text="Filtering disabled entirely above this DPI" FontFamily="Consolas, Courier New" FontSize="11" Foreground="#545478" Margin="0,2,0,0"/>
+                                            </StackPanel>
+                                            <Border Grid.Column="1" Background="#06182A" BorderBrush="#0A2A40" BorderThickness="1" CornerRadius="4" Padding="8,3" VerticalAlignment="Center">
+                                                <TextBlock Text="{Binding Value, ElementName=HighDpiHighSlider, StringFormat={}{0:F0} DPI}"
+                                                           FontFamily="Consolas, Courier New" FontSize="12" Foreground="#00D8FF" FontWeight="Bold"/>
+                                            </Border>
+                                        </Grid>
+                                        <Slider x:Name="HighDpiHighSlider" Style="{StaticResource S}"
+                                                Minimum="144" Maximum="300" Value="216"
+                                                Margin="0,8,0,14"
+                                                TickFrequency="1" IsSnapToTickEnabled="True"
+                                                ValueChanged="Setting_Changed_Slider"/>
+
+                                        <!-- LOD -->
                                         <Grid>
                                             <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
                                             <StackPanel>

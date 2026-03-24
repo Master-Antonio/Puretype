@@ -212,7 +212,7 @@ namespace puretype
 
         const auto emSize = static_cast<float>(height);
         const float darkenAmount = cfg.stemDarkeningEnabled
-                                       ? computeDarkenAmount(emSize, cfg.stemDarkeningStrength)
+                                       ? computeDarkenAmount(emSize, cfg.stemDarkeningStrength, glyph.fontWeight)
                                        : 0.0f;
 
         // The original 7-tap filter (1+2+3+4+3+2+1 / 16) spans 7/4 = 1.75 physical
@@ -339,7 +339,7 @@ namespace puretype
 
         const float emSize = static_cast<float>(glyph.pixelSize > 0 ? glyph.pixelSize : height);
         const float darkenAmount = cfg.stemDarkeningEnabled
-                                       ? computeDarkenAmount(emSize, cfg.stemDarkeningStrength)
+                                       ? computeDarkenAmount(emSize, cfg.stemDarkeningStrength, glyph.fontWeight)
                                        : 0.0f;
 
         // 5-tap FIR, symmetric, weights sum to 1.0 (1+2+3+2+1 = 9).

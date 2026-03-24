@@ -11,6 +11,7 @@
 #include <cstring>
 
 #include "color_math.h"
+#include "stem_darkening.h"
 
 extern void PureTypeLog(const char* fmt, ...);
 
@@ -289,8 +290,10 @@ namespace puretype::hooks
                             const PixelCapture& after,
                             COLORREF textColor,
                             const ConfigData& cfg,
-                            bool opaqueBackground,  // ETO_OPAQUE was set (GDI filled background)
-                            bool isComposited)      // DC belongs to a composited/layered window
+                            bool opaqueBackground, // ETO_OPAQUE was set (GDI filled background)
+                            bool isComposited, // DC belongs to a composited/layered window
+                            float dpiScale = 1.0f, // 1.0 = full effect, 0.0 = skip (DPI fade)
+                            uint16_t fontWeight = 400) // LOGFONT::lfWeight
     {
         if (!before.IsValid() || !after.IsValid()) return;
         if (before.width != after.width || before.height != after.height) return;
@@ -301,6 +304,8 @@ namespace puretype::hooks
         const float linTextR = sRGBToLinear(GetRValue(textColor));
         const float linTextG = sRGBToLinear(GetGValue(textColor));
         const float linTextB = sRGBToLinear(GetBValue(textColor));
+        // BT.709 text luminance — used for adaptive chromaKeep (#4).
+        const float linTextLuma = 0.2126f * linTextR + 0.7152f * linTextG + 0.0722f * linTextB;
         // sRGB text bytes used for mask extraction in sRGB space.
         const float textR_s_const = static_cast<float>(GetRValue(textColor));
         const float textG_s_const = static_cast<float>(GetGValue(textColor));
@@ -311,6 +316,12 @@ namespace puretype::hooks
         const bool qdGen4 = (cfg.panelType == PanelType::QD_OLED_GEN4);
         const bool qdPanel = qdGen1 || qdGen3 || qdGen4;
         const bool rgwbPanel = (cfg.panelType == PanelType::RGWB);
+
+        // Stem darkening — matches FreeType path (subpixel_filter.cpp)
+        const float emSize = static_cast<float>(h);
+        const float darkenAmount = cfg.stemDarkeningEnabled
+                                       ? computeDarkenAmount(emSize, cfg.stemDarkeningStrength, fontWeight)
+                                       : 0.0f;
 
         // ToneMapper S-curve LUT -----------------------------------------------
         const bool tinyText = (h <= 18);
@@ -338,11 +349,17 @@ namespace puretype::hooks
         };
 
         // chromaKeep -----------------------------------------------------------
-        float chromaKeep;
-        if (tinyText) chromaKeep = qdPanel ? 0.70f : 0.72f;
-        else if (smallText) chromaKeep = qdPanel ? 0.75f : 0.77f;
-        else if (h <= 32) chromaKeep = qdPanel ? 0.80f : 0.82f;
-        else chromaKeep = qdPanel ? 0.83f : 0.85f;
+        // Base value from glyph height; per-pixel adaptive modulation in Pass 3.
+        float chromaKeepBase;
+        if (tinyText) chromaKeepBase = qdPanel ? 0.70f : 0.72f;
+        else if (smallText) chromaKeepBase = qdPanel ? 0.75f : 0.77f;
+        else if (h <= 32) chromaKeepBase = qdPanel ? 0.80f : 0.82f;
+        else chromaKeepBase = qdPanel ? 0.83f : 0.85f;
+
+        // DPI-aware chromaKeep reduction (#7).
+        // At high DPI, reduce chroma to minimize fringing before reducing filter strength.
+        if (dpiScale < 1.0f)
+            chromaKeepBase *= 0.4f + 0.6f * dpiScale; // ramps from base to 40% of base
 
         // Output buffer — zero-initialised: alpha=0 for all pixels by default.
         //
@@ -366,12 +383,53 @@ namespace puretype::hooks
         std::vector<uint8_t> output(static_cast<size_t>(before.pitch) * h, 0);
         bool anyModified = false;
 
+        // Per-row buffers for multi-pass processing.
+        //
+        // The FreeType path applies a 3-tap FIR (0.25/0.50/0.25) to its coverage
+        // masks before the OLED remap. The old GDI path processed each pixel in
+        // isolation, so ClearType quantization artifacts (abrupt mask changes
+        // between adjacent pixels on the same glyph) passed through unsmoothed.
+        //
+        // New architecture: 3 passes per row.
+        //   Pass 1: extract masks + linearised background for every pixel, categorise.
+        //   Pass 2: 3-tap FIR horizontal smoothing on extracted masks.
+        //   Pass 3: OLED remap + chromaKeep + S-curve + blend using smoothed masks.
+        //
+        // Pixel category flags stored in rowFlags[]:
+        //   0 = Category A (unchanged) — already handled in Pass 1.
+        //   1 = Category B (mask ≈ 0, changed) — GDI passthrough, handled in Pass 1.
+        //   2 = Category C (valid text pixel) — processed in Pass 3.
+        std::vector<float> rowMaskR(w), rowMaskG(w), rowMaskB(w);
+        std::vector<float> rowSmR(w), rowSmG(w), rowSmB(w);
+        std::vector<float> rowBgR(w), rowBgG(w), rowBgB(w);
+        std::vector<uint8_t> rowFlags(w); // 0=skip, 1=passthrough, 2=text
+
+        // Previous-row smoothed masks for QD-OLED vertical blending (#6).
+        // QD-OLED triangular layouts have even/odd rows offset by ~1.5 subpixels.
+        // We approximate this with 25% blending from the adjacent row, shifted ±1 pixel.
+        // In the GDI path we only have the composited output, so we use the previous
+        // row's masks as a one-row lookahead approximation.
+        std::vector<float> prevSmR(w, 0.0f), prevSmG(w, 0.0f), prevSmB(w, 0.0f);
+        bool hasPrevRow = false;
+
+        auto extractMask = [](float ct, float bg, float text) -> float
+        {
+            const float d = text - bg;
+            // Use 0.5 as minimum delta to avoid division by near-zero
+            // in sRGB integer space (values 0..255).
+            if (std::abs(d) < 0.5f) return 0.0f;
+            return std::clamp((ct - bg) / d, 0.0f, 1.0f);
+        };
+
         for (int row = 0; row < h; ++row)
         {
             const uint8_t* bRow = before.data.data() + row * before.pitch;
             const uint8_t* aRow = after.data.data() + row * after.pitch;
             uint8_t* oRow = output.data() + row * before.pitch;
 
+            // -----------------------------------------------------------------
+            // Pass 1: extract masks + categorise every pixel in this row
+            // -----------------------------------------------------------------
             for (int col = 0; col < w; ++col)
             {
                 const uint8_t* bp = bRow + col * 4; // BGRA
@@ -380,15 +438,9 @@ namespace puretype::hooks
                 // Category A: pixel unchanged between before and after.
                 if (ap[0] == bp[0] && ap[1] == bp[1] && ap[2] == bp[2])
                 {
-                    // On non-composited DCs with ETO_OPAQUE: GDI filled the background.
-                    // We must write this fill so previous content (e.g., old text that
-                    // was in "before") gets properly erased. Without this, AlphaBlend
-                    // leaves old text pixels visible when the fill colour matches the
-                    // new background exactly (ghost chars in Notepad after deletion).
-                    //
-                    // On composited DCs: the "before" reads as zeros from the compositor
-                    // buffer; we MUST NOT write unchanged pixels or we'll overwrite the
-                    // wallpaper / compositor content with opaque fills.
+                    rowFlags[col] = 0;
+                    rowMaskR[col] = rowMaskG[col] = rowMaskB[col] = 0.0f;
+
                     if (opaqueBackground && !isComposited)
                     {
                         oRow[col * 4 + 0] = ap[0];
@@ -400,81 +452,32 @@ namespace puretype::hooks
                     continue;
                 }
 
-                // Pixel changed — we will write something.
+                // Pixel changed.
                 anyModified = true;
 
-                // --- Step 1: background and ClearType output values -----------
-                // Keep sRGB bytes for mask extraction (Step 2).
-                // Linearise for the final blend (Step 6).
-                const float bgB_lin = sRGBToLinear(bp[0]);
-                const float bgG_lin = sRGBToLinear(bp[1]);
-                const float bgR_lin = sRGBToLinear(bp[2]);
+                // Linearise background for the final blend (Pass 3).
+                rowBgB[col] = sRGBToLinear(bp[0]);
+                rowBgG[col] = sRGBToLinear(bp[1]);
+                rowBgR[col] = sRGBToLinear(bp[2]);
 
-                // --- Step 2: extract per-channel subpixel coverage masks -------
-                //
-                // GDI ClearType composites in sRGB-encoded (gamma-compressed) space:
-                //
-                //   ct_byte = bg_byte × (1 − m) + text_byte × m
-                //   →  m = (ct_byte − bg_byte) / (text_byte − bg_byte)
-                //
-                // Solving in LINEAR light is wrong because the blending was not
-                // performed in linear light. For mid-coverage values where the sRGB
-                // gamma curve deviates most from linear, linearising before extraction
-                // over- or under-estimates m, producing systematic errors in the
-                // per-channel coverage that then propagate through the OLED remap.
-                //
-                // Correct approach: solve in sRGB integer space, then use the mask
-                // (which is a linear coverage fraction 0..1) for the final linear-light
-                // blend in Step 6. The mask itself is dimensionless — it does not carry
-                // a gamma encoding.
+                // Extract per-channel subpixel coverage masks in sRGB space.
                 const float bgB_s = static_cast<float>(bp[0]);
                 const float bgG_s = static_cast<float>(bp[1]);
                 const float bgR_s = static_cast<float>(bp[2]);
                 const float ctB_s = static_cast<float>(ap[0]);
                 const float ctG_s = static_cast<float>(ap[1]);
                 const float ctR_s = static_cast<float>(ap[2]);
-                // sRGB text colour bytes (pre-computed once per call site below).
-                const float textB_s = textB_s_const;
-                const float textG_s = textG_s_const;
-                const float textR_s = textR_s_const;
 
-                auto extractMask = [](float ct, float bg, float text) -> float
-                {
-                    const float d = text - bg;
-                    // Use 0.5 as minimum delta to avoid division by near-zero
-                    // in sRGB integer space (values 0..255).
-                    if (std::abs(d) < 0.5f) return 0.0f;
-                    return std::clamp((ct - bg) / d, 0.0f, 1.0f);
-                };
+                const float mR = extractMask(ctR_s, bgR_s, textR_s_const);
+                const float mG = extractMask(ctG_s, bgG_s, textG_s_const);
+                const float mB = extractMask(ctB_s, bgB_s, textB_s_const);
 
-                const float maskR = extractMask(ctR_s, bgR_s, textR_s);
-                const float maskG = extractMask(ctG_s, bgG_s, textG_s);
-                const float maskB = extractMask(ctB_s, bgB_s, textB_s);
-
-                // Category B: mask extraction produced near-zero results for a changed pixel.
-                //
-                // This occurs in two situations:
-                //
-                //   1. GetTextColor() mismatch — the control drew with a different colour than
-                //      GetTextColor() reports (e.g., read-only URL controls in Property dialogs
-                //      that set textColor independently of the DC text colour attribute).
-                //      Result without fix: all masks=0 → out = old_bg → text rendered in bg
-                //      colour → invisible ("testo bianco su sfondo bianco").
-                //
-                //   2. ETO_OPAQUE fill reversed direction — when Notepad deletes text, GDI
-                //      calls ETO_OPAQUE to fill the line with white. The old text pixel ("before"
-                //      = dark gray) and the fill ("after" = white) differ, so we enter the remap
-                //      path. But textColor = black → expected direction is bg→black, actual is
-                //      bg→white (opposite) → extractMask gives negative values, clamped to 0.
-                //      Result without fix: masks=0 → out = old_gray → ghost chars.
-                //
-                // Fix: write GDI output (ap) directly. On non-composited DCs this is safe and
-                // produces correct output. On composited DCs (desktop icon labels) we keep
-                // alpha=0 — writing ap when "before" reads as compositor zeros could produce
-                // opaque fills over the wallpaper.
-                const float totalMask = std::max({maskR, maskG, maskB});
+                const float totalMask = std::max({mR, mG, mB});
                 if (totalMask < 0.02f)
                 {
+                    // Category B: mask extraction failed.
+                    rowFlags[col] = 1;
+                    rowMaskR[col] = rowMaskG[col] = rowMaskB[col] = 0.0f;
                     if (!isComposited)
                     {
                         oRow[col * 4 + 0] = ap[0];
@@ -482,11 +485,201 @@ namespace puretype::hooks
                         oRow[col * 4 + 2] = ap[2];
                         oRow[col * 4 + 3] = 0xFF;
                     }
-                    // else: composited DC — keep alpha=0, safer than writing garbage
                     continue;
                 }
 
-                // --- Step 3: OLED channel reconstruction -----------------------
+                // Category C: valid text pixel.
+                rowFlags[col] = 2;
+                rowMaskR[col] = mR;
+                rowMaskG[col] = mG;
+                rowMaskB[col] = mB;
+            }
+
+            // -----------------------------------------------------------------
+            // Pass 2: bilateral edge-preserving horizontal smoothing
+            //
+            // Unlike a simple FIR which blurs everything equally, the bilateral
+            // filter modulates each neighbor's weight by mask-value similarity.
+            // Neighbors with similar coverage (stem interiors) get smoothed;
+            // neighbors with very different coverage (glyph edges) are preserved.
+            //
+            // This achieves: smooth stems + sharp edges simultaneously.
+            //
+            // Base kernel: 0.08 / 0.84 / 0.08 — tuned for pixel resolution.
+            // The 0.08 side weight is further scaled by exp(-diff²/2σ²) where
+            // diff is the mask difference and σ = kBilateralSigma.
+            // -----------------------------------------------------------------
+            constexpr float kFirSide = 0.08f;
+            constexpr float kBilateralSigma = 0.15f; // mask-space similarity threshold
+            constexpr float kSigma2x2 = 2.0f * kBilateralSigma * kBilateralSigma;
+
+            for (int col = 0; col < w; ++col)
+            {
+                const float mR = rowMaskR[col];
+                const float mG = rowMaskG[col];
+                const float mB = rowMaskB[col];
+
+                // Left neighbor
+                float lwR = 0.0f, lwG = 0.0f, lwB = 0.0f;
+                float lR = mR, lG = mG, lB = mB;
+                if (col > 0)
+                {
+                    lR = rowMaskR[col - 1];
+                    lG = rowMaskG[col - 1];
+                    lB = rowMaskB[col - 1];
+                    const float dR = mR - lR, dG = mG - lG, dB = mB - lB;
+                    lwR = kFirSide * std::exp(-(dR * dR) / kSigma2x2);
+                    lwG = kFirSide * std::exp(-(dG * dG) / kSigma2x2);
+                    lwB = kFirSide * std::exp(-(dB * dB) / kSigma2x2);
+                }
+
+                // Right neighbor
+                float rwR = 0.0f, rwG = 0.0f, rwB = 0.0f;
+                float rR = mR, rG = mG, rB = mB;
+                if (col < w - 1)
+                {
+                    rR = rowMaskR[col + 1];
+                    rG = rowMaskG[col + 1];
+                    rB = rowMaskB[col + 1];
+                    const float dR = mR - rR, dG = mG - rG, dB = mB - rB;
+                    rwR = kFirSide * std::exp(-(dR * dR) / kSigma2x2);
+                    rwG = kFirSide * std::exp(-(dG * dG) / kSigma2x2);
+                    rwB = kFirSide * std::exp(-(dB * dB) / kSigma2x2);
+                }
+
+                // Normalize: center weight absorbs unused side weight
+                rowSmR[col] = lR * lwR + mR * (1.0f - lwR - rwR) + rR * rwR;
+                rowSmG[col] = lG * lwG + mG * (1.0f - lwG - rwG) + rG * rwG;
+                rowSmB[col] = lB * lwB + mB * (1.0f - lwB - rwB) + rB * rwB;
+            }
+
+            // -----------------------------------------------------------------
+            // Pass 2.25: Fractional subpixel positioning (#3)
+            //
+            // ClearType quantizes glyph positions to integer pixel boundaries.
+            // The ideal position may lie at a 1/3 or 2/3 pixel subpixel offset.
+            //
+            // We estimate the subpixel phase error by comparing the R and B
+            // mask centroids: if R and B coverage are perfectly aligned, the
+            // glyph is centered. If they differ, we need a fractional shift.
+            //
+            // The shift is computed as: (centroidR - centroidB) deviation from
+            // the expected RGB-stripe separation (0.667 pixel). A positive
+            // deviation means the glyph should shift right; negative = left.
+            //
+            // Clamped to ±0.33 pixel (one subpixel).  Applied via linear
+            // interpolation between adjacent smoothed mask values.
+            // -----------------------------------------------------------------
+            if (cfg.enableFractionalPositioning)
+            {
+                // Compute weighted centroids of R and B masks
+                float sumR = 0.0f, sumB = 0.0f;
+                float centR = 0.0f, centB = 0.0f;
+                int textCount = 0;
+                for (int col = 0; col < w; ++col)
+                {
+                    if (rowFlags[col] != 2) continue;
+                    textCount++;
+                    const float fcol = static_cast<float>(col);
+                    sumR += rowSmR[col];
+                    centR += rowSmR[col] * fcol;
+                    sumB += rowSmB[col];
+                    centB += rowSmB[col] * fcol;
+                }
+
+                // Only apply when enough data for reliable estimate
+                if (textCount >= 3 && sumR > 0.5f && sumB > 0.5f)
+                {
+                    centR /= sumR;
+                    centB /= sumB;
+
+                    // Expected R-B separation depends on physical panel topology.
+                    // Accurate subpixel positioning requires centering the masks
+                    // around the actual physical subpixel barycenters.
+                    float expectedSep = -0.667f; // Default RGB stripe
+                    if (qdGen3 || qdGen4) expectedSep = -0.500f; // R=0.25, B=0.75
+                    else if (qdGen1) expectedSep = -0.440f; // R=0.28, B=0.72
+
+                    // Actual separation tells us the phase error.
+                    const float actualSep = centR - centB;
+                    const float phaseError = (actualSep - expectedSep) * 0.5f;
+                    const float shift = std::clamp(phaseError, -0.33f, 0.33f);
+
+                    if (std::abs(shift) > 0.02f) // skip trivial shifts
+                    {
+                        // Apply fractional shift via linear interpolation.
+                        // Positive shift = move right = sample from left neighbor.
+                        const float t = std::abs(shift);
+                        const int dir = (shift > 0.0f) ? -1 : 1; // sample direction
+
+                        // Work on a copy to avoid read-after-write issues
+                        std::vector<float> tmpR(rowSmR), tmpG(rowSmG), tmpB(rowSmB);
+                        for (int col = 0; col < w; ++col)
+                        {
+                            const int srcCol = std::clamp(col + dir, 0, w - 1);
+                            rowSmR[col] = tmpR[col] * (1.0f - t) + tmpR[srcCol] * t;
+                            rowSmG[col] = tmpG[col] * (1.0f - t) + tmpG[srcCol] * t;
+                            rowSmB[col] = tmpB[col] * (1.0f - t) + tmpB[srcCol] * t;
+                        }
+                    }
+                }
+            }
+
+            // -----------------------------------------------------------------
+            // Pass 2.5: Vertical QD-OLED blending (#6)
+            //
+            // QD-OLED triangular layout: even/odd rows offset by ~1.5 subpixels.
+            // The FreeType path uses SampleContinuousX with ±1.5 subpxl offset
+            // from the adjacent row. In the GDI path we approximate this with
+            // 25% blending from the PREVIOUS row's smoothed masks, shifted ±1
+            // pixel (the closest integer approximation of 1.5 subpixels at the
+            // pixel level of the composited ClearType output).
+            //
+            // Even rows: adjacent row is shifted right → blend from col+1.
+            // Odd  rows: adjacent row is shifted left  → blend from col-1.
+            // -----------------------------------------------------------------
+            if (qdPanel && hasPrevRow)
+            {
+                const int shift = (row % 2 == 0) ? 1 : -1;
+                constexpr float kVertBlend = 0.10f; // minimal — pixel resolution is coarse
+
+                for (int col = 0; col < w; ++col)
+                {
+                    const int adjCol = std::clamp(col + shift, 0, w - 1);
+                    rowSmR[col] = rowSmR[col] * (1.0f - kVertBlend)
+                        + prevSmR[adjCol] * kVertBlend;
+                    rowSmG[col] = rowSmG[col] * (1.0f - kVertBlend)
+                        + prevSmG[adjCol] * kVertBlend;
+                    rowSmB[col] = rowSmB[col] * (1.0f - kVertBlend)
+                        + prevSmB[adjCol] * kVertBlend;
+                }
+            }
+
+            // -----------------------------------------------------------------
+            // Pass 3: OLED remap + chromaKeep + S-curve + blend
+            // Uses smoothed masks from Pass 2 (+ vertical blend) for Category C pixels.
+            // -----------------------------------------------------------------
+            for (int col = 0; col < w; ++col)
+            {
+                if (rowFlags[col] != 2) continue;
+
+                // Apply stem darkening before OLED remap — darkens thin stems.
+                float maskR = applyStemDarkening(rowSmR[col], darkenAmount);
+                float maskG = applyStemDarkening(rowSmG[col], darkenAmount);
+                float maskB = applyStemDarkening(rowSmB[col], darkenAmount);
+
+                // --- WOLED Cross-Talk Reduction (RWBG / RGWB) ----------
+                // The physical white subpixel steals energy from RGB. This simulates
+                // the hardware energy redirection to suppress color fringing.
+                if (!qdPanel && cfg.woledCrossTalkReduction > 0.0f)
+                {
+                    const float wSignal = std::min({maskR, maskG, maskB}) * cfg.woledCrossTalkReduction;
+                    maskR = std::max(0.0f, maskR - wSignal);
+                    maskG = std::max(0.0f, maskG - wSignal);
+                    maskB = std::max(0.0f, maskB - wSignal);
+                }
+
+                // --- OLED channel reconstruction -----------------------
                 //
                 // ClearType subpixel centers (RGB stripe, 3 per pixel):
                 //   CT_R = 0.1667    CT_G = 0.5000    CT_B = 0.8333
@@ -545,37 +738,24 @@ namespace puretype::hooks
 
                 if (qdGen1)
                 {
-                    // Gen 1-2: asymmetric R/B (R larger, shifted left; B smaller, shifted right)
-                    // R at 0.280: wR=0.66, wG=0.34
-                    // G at 0.500: exact
-                    // B at 0.720: wG=0.34, wB=0.66
                     finalCovR = maskR * 0.66f + maskG * 0.34f;
                     finalCovG = maskG;
                     finalCovB = maskG * 0.34f + maskB * 0.66f;
                 }
                 else if (qdGen3)
                 {
-                    // Gen 3: rectangular, nearly symmetric
-                    // R at 0.250: wR=0.75, wG=0.25
-                    // G at 0.500: exact
-                    // B at 0.750: wG=0.25, wB=0.75
                     finalCovR = maskR * 0.75f + maskG * 0.25f;
                     finalCovG = maskG;
                     finalCovB = maskG * 0.25f + maskB * 0.75f;
                 }
                 else if (qdGen4)
                 {
-                    // Gen 4: rectangular, R ≈ B equal — same center positions as gen3
-                    // R at 0.250: wR=0.75, wG=0.25
-                    // G at 0.500: exact
-                    // B at 0.750: wG=0.25, wB=0.75
                     finalCovR = maskR * 0.75f + maskG * 0.25f;
                     finalCovG = maskG;
                     finalCovB = maskG * 0.25f + maskB * 0.75f;
                 }
                 else if (rgwbPanel)
                 {
-                    // RGWB: measured centers R=0.100, G=0.300, W=0.600, B=0.900
                     const float alpha_R = maskR;
                     const float alpha_G = maskR * 0.60f + maskG * 0.40f;
                     const float alpha_W = (maskG * 0.70f + maskB * 0.30f)
@@ -587,7 +767,6 @@ namespace puretype::hooks
                 }
                 else
                 {
-                    // RWBG (default): measured centers R=0.100, W=0.400, B=0.700, G=0.900
                     const float alpha_R = maskR;
                     const float alpha_W = (maskR * 0.30f + maskG * 0.70f)
                         * (1.0f - cfg.woledCrossTalkReduction);
@@ -598,7 +777,17 @@ namespace puretype::hooks
                     finalCovB = std::max(alpha_B, alpha_W);
                 }
 
-                // --- Step 4: chromaKeep (BT.709 luma anchor) ------------------
+                // --- chromaKeep (BT.709 luma anchor) ------------------
+                // Adaptive modulation (#4): scale chromaKeep by local contrast.
+                // High contrast (dark mode: light text on dark bg) → more chroma.
+                // Low contrast (near-neutral text on light bg) → less chroma.
+                const float bgLuma = 0.2126f * rowBgR[col]
+                    + 0.7152f * rowBgG[col]
+                    + 0.0722f * rowBgB[col];
+                const float localContrast = std::abs(linTextLuma - bgLuma);
+                const float chromaKeep = chromaKeepBase
+                    * (0.7f + 0.3f * localContrast);
+
                 const float yCov = 0.2126f * finalCovR
                     + 0.7152f * finalCovG
                     + 0.0722f * finalCovB;
@@ -606,15 +795,16 @@ namespace puretype::hooks
                 finalCovG = yCov + (finalCovG - yCov) * chromaKeep;
                 finalCovB = yCov + (finalCovB - yCov) * chromaKeep;
 
-                // --- Step 5: S-curve readability boost ------------------------
+                // --- S-curve readability boost ------------------------
                 finalCovR = scurve(finalCovR);
                 finalCovG = scurve(finalCovG);
                 finalCovB = scurve(finalCovB);
 
-                // --- Step 6: final per-channel blend  bg → textColor ----------
-                // Background is in linear light (bgR_lin etc.).
-                // Coverage masks are dimensionless [0,1] — no gamma.
-                // Text colour is in linear light (linTextR etc.).
+                // --- final per-channel blend  bg → textColor ----------
+                const float bgR_lin = rowBgR[col];
+                const float bgG_lin = rowBgG[col];
+                const float bgB_lin = rowBgB[col];
+
                 const float outR = bgR_lin * (1.0f - finalCovR) + linTextR * finalCovR;
                 const float outG = bgG_lin * (1.0f - finalCovG) + linTextG * finalCovG;
                 const float outB = bgB_lin * (1.0f - finalCovB) + linTextB * finalCovB;
@@ -623,6 +813,15 @@ namespace puretype::hooks
                 oRow[col * 4 + 1] = linearToSRGB(outG);
                 oRow[col * 4 + 2] = linearToSRGB(outR);
                 oRow[col * 4 + 3] = 0xFF;
+            }
+
+            // Save smoothed masks for vertical QD-OLED blending (#6) in next row.
+            if (qdPanel)
+            {
+                std::copy(rowSmR.begin(), rowSmR.end(), prevSmR.begin());
+                std::copy(rowSmG.begin(), rowSmG.end(), prevSmG.begin());
+                std::copy(rowSmB.begin(), rowSmB.end(), prevSmB.begin());
+                hasPrevRow = true;
             }
         }
 
@@ -696,6 +895,28 @@ namespace puretype::hooks
         if (cfg.filterStrength <= 0.0f)
             return g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
 
+        // DPI-aware graduated fade-out (improvement #7).
+        // Cached per-thread to avoid calling GetDeviceCaps on every ExtTextOutW.
+        static thread_local float s_cachedDpi = 0.0f;
+        static thread_local int s_dpiCallCount = 0;
+        if (s_cachedDpi == 0.0f || (++s_dpiCallCount & 0xFF) == 0) // re-query every 256 calls
+            s_cachedDpi = static_cast<float>(GetDeviceCaps(hdc, LOGPIXELSX));
+
+        const float dpi = s_cachedDpi;
+
+        // Above high threshold: skip OLED processing entirely (passthrough).
+        if (dpi >= cfg.highDpiThresholdHigh)
+            return g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
+
+        // Compute DPI scale factor: 1.0 at/below dpiLow, ramps to 0.0 at dpiHigh.
+        float dpiScale = 1.0f;
+        if (dpi > cfg.highDpiThresholdLow)
+        {
+            dpiScale = 1.0f - std::clamp(
+                (dpi - cfg.highDpiThresholdLow) / (cfg.highDpiThresholdHigh - cfg.highDpiThresholdLow),
+                0.0f, 1.0f);
+        }
+
         HookRefGuard refGuard;
         g_insideHook = true;
 
@@ -768,7 +989,8 @@ namespace puretype::hooks
 
                 const bool opaqueBackground = (options & ETO_OPAQUE) && (lprc != nullptr);
 
-                RemapToOLED(hdc, before, after, textColor, cfg, opaqueBackground, isComposited);
+                RemapToOLED(hdc, before, after, textColor, cfg,
+                            opaqueBackground, isComposited, dpiScale);
             }
 
             g_insideHook = false;

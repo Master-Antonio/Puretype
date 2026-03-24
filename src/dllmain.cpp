@@ -104,7 +104,8 @@ BOOL APIENTRY DllMain(const HMODULE hModule, const DWORD reason, LPVOID)
                 return FALSE;
             }
 
-            puretype::initColorMathLUTs();
+            puretype::initColorMathLUTs(
+                puretype::Config::Instance().Data().gammaMode == puretype::GammaMode::OLED);
 
             if (puretype::Config::Instance().Data().debugEnabled)
             {

@@ -14,9 +14,16 @@ namespace puretype
         QD_OLED_GEN4, // Samsung QD-OLED gen 4   — rectangular, R=B equal width
     };
 
+    enum class GammaMode
+    {
+        SRGB, // Standard IEC 61966-2-1 sRGB curve
+        OLED, // OLED-calibrated: softer gamma (~2.0) below 20%, sRGB above
+    };
+
     struct ConfigData
     {
         PanelType panelType = PanelType::RWBG;
+        GammaMode gammaMode = GammaMode::SRGB;
         float filterStrength = 1.0f;
         float gamma = 1.0f;
         bool enableSubpixelHinting = true;
@@ -28,6 +35,12 @@ namespace puretype
 
         bool stemDarkeningEnabled = true;
         float stemDarkeningStrength = 0.35f;
+
+        // DPI-aware fade-out thresholds.
+        // Between dpiLow and dpiHigh, filterStrength and chromaKeep ramp down.
+        // Above dpiHigh the filter is skipped entirely (GDI passthrough).
+        float highDpiThresholdLow  = 144.0f;
+        float highDpiThresholdHigh = 216.0f;
 
         bool debugEnabled = false;
         std::string logFile = "puretype.log";

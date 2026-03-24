@@ -14,7 +14,13 @@ namespace puretype
         float darkenMin = 0.05f;
     };
 
+    // Weight-aware stem darkening.
+    // fontWeight: 100–900, default 400 (Regular).
+    //   weight=400 → scale=1.0 (unchanged)
+    //   weight=700 → scale≈0.4 (Bold needs less darkening — stems already thick)
+    //   weight=200 → scale≈1.4 (Light needs more — stems are thin)
     inline float computeDarkenAmount(float emSize, float strength,
+                                     uint16_t fontWeight = 400,
                                      const StemDarkeningParams& params = {})
     {
         if (strength <= 0.0f) return 0.0f;
@@ -25,7 +31,12 @@ namespace puretype
 
         float amount = params.darkenMax + t * (params.darkenMin - params.darkenMax);
 
-        return amount * strength;
+        // Scale by font weight deviation from Regular (400).
+        // Heavier fonts → less darkening, lighter fonts → more.
+        float weightScale = 1.0f + (400.0f - static_cast<float>(fontWeight)) / 500.0f;
+        weightScale = std::clamp(weightScale, 0.4f, 1.6f);
+
+        return amount * strength * weightScale;
     }
 
     inline float applyStemDarkening(float coverage, float darkenAmount)

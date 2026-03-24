@@ -38,6 +38,7 @@ namespace PuretypeUI
             uint   fontSize,
             float  filterStrength,
             float  gamma,
+            int    gammaMode,
             float  lumaContrastStrength,
             float  woledCrossTalkReduction,
             bool   enableSubpixelHinting,
@@ -190,6 +191,12 @@ namespace PuretypeUI
                 if (string.Equals(item.Tag?.ToString(), panel, StringComparison.OrdinalIgnoreCase))
                     { item.IsSelected = true; break; }
 
+            // Gamma mode
+            var gammaStr = d.GetValueOrDefault("general.gammamode", "oled").ToLowerInvariant();
+            foreach (ComboBoxItem item in GammaModeCombo.Items)
+                if (string.Equals(item.Tag?.ToString(), gammaStr, StringComparison.OrdinalIgnoreCase))
+                    { item.IsSelected = true; break; }
+
             FilterStrengthSlider.Value       = Math.Clamp(ParseFloat(d, "general.filterstrength",         1.0f),  0.0, 5.0);
             GammaSlider.Value                = Math.Clamp(ParseFloat(d, "general.gamma",                  1.0f),  0.5, 3.0);
             SubpixelHintingCheck.IsChecked   = ParseBool (d, "general.enablesubpixelhinting",             true);
@@ -204,6 +211,12 @@ namespace PuretypeUI
             LodSmallSlider.Value   = lodSmall;
             LodLargeSlider.Minimum = lodSmall + 1;
             LodLargeSlider.Value   = Math.Max(lodLarge, lodSmall + 1);
+
+            double dpiLow = Math.Clamp(ParseFloat(d, "general.highdpithresholdlow", 144.0f), 96.0, 192.0);
+            double dpiHigh = Math.Clamp(ParseFloat(d, "general.highdpithresholdhigh", 216.0f), 144.0, 300.0);
+            HighDpiLowSlider.Value = dpiLow;
+            HighDpiHighSlider.Minimum = dpiLow + 1;
+            HighDpiHighSlider.Value = Math.Max(dpiHigh, dpiLow + 1);
 
             DebugEnabledCheck.IsChecked      = ParseBool(d, "debug.enabled",                  false);
             LogFileText.Text                 = d.GetValueOrDefault("debug.logfile",           "PURETYPE.log");
@@ -232,6 +245,8 @@ namespace PuretypeUI
         {
             var panelTag = (PanelTypeCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "rwbg";
             SetIniValue("general", "panelType",                  panelTag);
+            var gammaTag = (GammaModeCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "oled";
+            SetIniValue("general", "gammaMode",                  gammaTag);
             SetIniValue("general", "filterStrength",             F2(FilterStrengthSlider.Value));
             SetIniValue("general", "gamma",                      F2(GammaSlider.Value));
             SetIniValue("general", "enableSubpixelHinting",      Bool(SubpixelHintingCheck.IsChecked     == true));
@@ -242,6 +257,8 @@ namespace PuretypeUI
             SetIniValue("general", "woledCrossTalkReduction",    F2(WoledCrosstalkSlider.Value));
             SetIniValue("general", "lodThresholdSmall",          F2(LodSmallSlider.Value));
             SetIniValue("general", "lodThresholdLarge",          F2(LodLargeSlider.Value));
+            SetIniValue("general", "highDpiThresholdLow",        F2(HighDpiLowSlider.Value));
+            SetIniValue("general", "highDpiThresholdHigh",       F2(HighDpiHighSlider.Value));
 
             var bl = string.Join(", ", BlacklistText.Text.Split(new[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries).Select(s => s.Trim()));
             SetIniValue("general", "blacklist",                  bl);
@@ -289,6 +306,9 @@ namespace PuretypeUI
                 var sizeItem = PreviewSizeCombo.SelectedItem as ComboBoxItem;
                 uint fontSize = sizeItem != null && uint.TryParse(sizeItem.Tag?.ToString(), out uint fs) ? fs : 32u;
 
+                var gammaItem = GammaModeCombo.SelectedItem as ComboBoxItem;
+                int gammaMode = gammaItem?.Tag?.ToString() == "oled" ? 1 : 0;
+
                 string sample = "PureType brings true OLED subpixel rendering to Windows.\n" +
                                 "Text is crisp, smooth, and color-fringe free, just like a smartphone.\n" +
                                 "The quick brown fox jumps over the lazy dog.\n" +
@@ -298,6 +318,7 @@ namespace PuretypeUI
                     sample, FontPath, fontSize,
                     (float)FilterStrengthSlider.Value,
                     (float)GammaSlider.Value,
+                    gammaMode,
                     (float)LumaContrastSlider.Value,
                     (float)WoledCrosstalkSlider.Value,
                     SubpixelHintingCheck.IsChecked == true,
@@ -379,6 +400,56 @@ namespace PuretypeUI
             UpdatePreview();
         }
 
+        private void ApplyRecommended_Click(object sender, RoutedEventArgs e)
+        {
+            if (!IsLoaded) return;
+            var tag = (PanelTypeCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString() ?? "rwbg";
+
+            // Reset base parameters
+            FilterStrengthSlider.Value = 1.0;
+            GammaSlider.Value = 1.0;
+            
+            SubpixelHintingCheck.IsChecked = true;
+            FractionalPositioningCheck.IsChecked = true;
+            
+            LodSmallSlider.Value = 10;
+            LodLargeSlider.Value = 22;
+            
+            HighDpiLowSlider.Value = 144;
+            HighDpiHighSlider.Value = 216;
+
+            foreach (ComboBoxItem item in GammaModeCombo.Items)
+            {
+                if (item.Tag?.ToString() == "oled") { item.IsSelected = true; break; }
+            }
+
+            // Apply panel-specific magic numbers based on Oled.MD guidelines
+            switch(tag)
+            {
+                case "rwbg":
+                case "rgwb":
+                    WoledCrosstalkSlider.Value = 0.10;
+                    LumaContrastSlider.Value = 1.25;
+                    StemDarkeningCheck.IsChecked = true;
+                    StemStrengthSlider.Value = 0.20;
+                    break;
+                case "qd_oled_gen1":
+                    WoledCrosstalkSlider.Value = 0.00;
+                    LumaContrastSlider.Value = 1.15;
+                    FilterStrengthSlider.Value = 1.10; // Extra smooth for triangle matrix
+                    StemDarkeningCheck.IsChecked = true;
+                    StemStrengthSlider.Value = 0.30; // Very narrow SPD, stronger darkening
+                    break;
+                case "qd_oled_gen3":
+                case "qd_oled_gen4":
+                    WoledCrosstalkSlider.Value = 0.00;
+                    LumaContrastSlider.Value = 1.15;
+                    StemDarkeningCheck.IsChecked = true;
+                    StemStrengthSlider.Value = 0.25;
+                    break;
+            }
+        }
+
         private void StemDarkening_Changed(object sender, RoutedEventArgs e)
         {
             if (!IsLoaded) return;
@@ -398,6 +469,14 @@ namespace PuretypeUI
             LodLargeSlider.Minimum = LodSmallSlider.Value + 1;
             if (LodLargeSlider.Value <= LodSmallSlider.Value)
                 LodLargeSlider.Value = LodSmallSlider.Value + 1;
+        }
+
+        private void DpiLow_Changed(object sender, RoutedPropertyChangedEventArgs<double> e)
+        {
+            if (!IsLoaded) return;
+            HighDpiHighSlider.Minimum = HighDpiLowSlider.Value + 1;
+            if (HighDpiHighSlider.Value <= HighDpiLowSlider.Value)
+                HighDpiHighSlider.Value = HighDpiLowSlider.Value + 1;
         }
 
         private void PreviewSize_Changed(object sender, SelectionChangedEventArgs e)

@@ -165,6 +165,20 @@ namespace puretype
         // applyStemDarkening and make text invisible; negative values brighten stems.
         m_data.stemDarkeningStrength = std::clamp(m_data.stemDarkeningStrength, 0.0f, 2.0f);
 
+        // Gamma mode: "srgb" (default) or "oled" (softer shadows for OLED panels).
+        std::string gammaStr = ToLower(GetValue("general", "gammamode", "srgb"));
+        m_data.gammaMode = (gammaStr == "oled") ? GammaMode::OLED : GammaMode::SRGB;
+
+        // DPI-aware fade-out thresholds.
+        try { m_data.highDpiThresholdLow = std::stof(GetValue("general", "highdpithresholdlow", "144.0")); }
+        catch (...) { m_data.highDpiThresholdLow = 144.0f; }
+        m_data.highDpiThresholdLow = std::clamp(m_data.highDpiThresholdLow, 96.0f, 384.0f);
+
+        try { m_data.highDpiThresholdHigh = std::stof(GetValue("general", "highdpithresholdhigh", "216.0")); }
+        catch (...) { m_data.highDpiThresholdHigh = 216.0f; }
+        m_data.highDpiThresholdHigh = std::clamp(m_data.highDpiThresholdHigh,
+                                                 m_data.highDpiThresholdLow + 1.0f, 600.0f);
+
         std::string debugStr = ToLower(GetValue("debug", "enabled", "false"));
         m_data.debugEnabled = (debugStr == "true" || debugStr == "1" || debugStr == "yes");
 
