@@ -66,8 +66,9 @@ original font is restored immediately after capture. Glyph metrics are unaffecte
 ## Installation
 
 1. Download the latest release and extract to a permanent directory, e.g. `C:\PureType\`.
-2. Open `puretype.ini` and set `panelType` to match your display (see table above).
-3. Run `inject.exe`. To start automatically at login, add it to Task Scheduler or a registry run key.
+2. Run `puretype.exe`.
+3. Puretype is running in background. Double click to the icon in the system tray to open UI.
+4. Chose the panel type and click the "✦ Apply recommended" button to automatically load the tuned constants for your panel.
 
 No system-wide ClearType settings need to be changed. PureType works whether ClearType is enabled or disabled.
 
@@ -84,16 +85,19 @@ All settings live in `puretype.ini` next to the DLL. Changes take effect after r
 ; QD-OLED: qd_oled_gen1 | qd_oled_gen3 | qd_oled_gen4
 panelType                   = rwbg
 
-filterStrength              = 0.75   ; 0.0 (off) – 5.0
-gamma                       = 1.0    ; 0.5 – 3.0
+filterStrength              = 1.00   ; 0.0 (off) – 5.0
+gamma                       = 1.00   ; 0.5 – 3.0
+gammaMode                   = oled   ; srgb | oled
 enableSubpixelHinting       = true
 enableFractionalPositioning = true
-lodThresholdSmall           = 10.0   ; px, small-text path threshold
-lodThresholdLarge           = 22.0   ; px, large-text path threshold
-woledCrossTalkReduction     = 0.08   ; 0.0 – 1.0, WOLED only
+lodThresholdSmall           = 10.00  ; px, small-text path threshold
+lodThresholdLarge           = 22.00  ; px, large-text path threshold
+highDpiThresholdLow         = 144.00 ; DPI, filtering fade-out start
+highDpiThresholdHigh        = 216.00 ; DPI, filtering disabled completely
+woledCrossTalkReduction     = 0.10   ; 0.0 – 1.0, WOLED only
 lumaContrastStrength        = 1.15   ; 1.0 – 3.0
 stemDarkeningEnabled        = true
-stemDarkeningStrength       = 0.25
+stemDarkeningStrength       = 0.25   ; font-weight aware darkening
 
 [debug]
 enabled                     = false
@@ -101,8 +105,18 @@ logFile                     = PURETYPE.log
 highlightRenderedGlyphs     = false
 ```
 
-`woledCrossTalkReduction` attenuates the W subpixel contribution before the TCON `max()` merge, eliminating the grey
-haze that appears on dark backgrounds when the white subpixel fires at full intensity.
+`woledCrossTalkReduction` attenuates the W subpixel contribution before the TCON `max()` merge, eliminating the grey haze that appears on dark backgrounds when the white subpixel fires at full intensity. `stemDarkeningStrength` dynamically reduces the visual weight of thin fonts on high-color-volume panels (like QD-OLED) based on the font's logical weight, achieving parity with FreeType's darkening algorithms.
+
+---
+
+## Graphical Interface (PuretypeUI)
+
+Starting with recent builds, PureType includes a modern WPF-based graphical interface (`PuretypeUI.exe`) that allows you to preview the subpixel rendering in real-time. 
+
+You no longer need to edit `puretype.ini` manually: 
+1. Open the UI to view the live rendering preview.
+2. Select your OLED panel type from the drop-down.
+3. Click the **"✦ Apply recommended"** button to automatically load the scientifically tuned constants (Crosstalk reduction, Stem darkening, Luma contrast) specifically designed for your panel's Color Volume and Spectral Power Distribution.
 
 ---
 
