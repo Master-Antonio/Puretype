@@ -785,8 +785,9 @@ namespace puretype::hooks
                     + 0.7152f * rowBgG[col]
                     + 0.0722f * rowBgB[col];
                 const float localContrast = std::abs(linTextLuma - bgLuma);
-                const float chromaKeep = chromaKeepBase
-                    * (0.7f + 0.3f * localContrast);
+                const float chromaKeep = std::clamp(
+                    chromaKeepBase * (0.7f + 0.3f * localContrast),
+                    0.0f, 1.0f);
 
                 const float yCov = 0.2126f * finalCovR
                     + 0.7152f * finalCovG
@@ -989,8 +990,21 @@ namespace puretype::hooks
 
                 const bool opaqueBackground = (options & ETO_OPAQUE) && (lprc != nullptr);
 
+                // Extract font weight for stem darkening adaptation.
+                uint16_t fontWeight = 400;
+                {
+                    HFONT hFont = static_cast<HFONT>(GetCurrentObject(hdc, OBJ_FONT));
+                    if (hFont)
+                    {
+                        LOGFONTW lf = {};
+                        if (GetObjectW(hFont, sizeof(lf), &lf))
+                            fontWeight = static_cast<uint16_t>(
+                                std::clamp(static_cast<int>(lf.lfWeight), 100, 900));
+                    }
+                }
+
                 RemapToOLED(hdc, before, after, textColor, cfg,
-                            opaqueBackground, isComposited, dpiScale);
+                            opaqueBackground, isComposited, dpiScale, fontWeight);
             }
 
             g_insideHook = false;
