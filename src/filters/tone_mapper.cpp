@@ -21,7 +21,16 @@ namespace puretype
         const float contrastStrength = cfg.lumaContrastStrength;
 
         // --- CPU OPTIMIZATION: LUT for S-curve ---
-        const float expBase = (qdPanel ? 1.01f : 1.03f) * (1.0f + (contrastStrength - 1.0f) * 0.5f);
+        float expBase = (qdPanel ? 1.01f : 1.03f) * (1.0f + (contrastStrength - 1.0f) * 0.5f);
+
+        // Reduce S-curve aggression on thin fonts to prevent crushing delicate stems
+        // that were specifically thickened by the Stem Darkening pass.
+        if (cfg.stemDarkeningEnabled && bitmap.fontWeight < 400 && bitmap.fontWeight > 0)
+        {
+            float weightFactor = static_cast<float>(bitmap.fontWeight) / 400.0f;
+            expBase = 1.0f + (expBase - 1.0f) * weightFactor;
+        }
+
         const float expSize = qdPanel ? 0.10f : 0.16f;
         const float gainBase = qdPanel ? 1.000f : 1.004f;
         const float gainSize = qdPanel ? 0.008f : 0.012f;

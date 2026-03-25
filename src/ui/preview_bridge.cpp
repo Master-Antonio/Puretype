@@ -12,6 +12,7 @@ extern "C" __declspec(dllexport) bool GeneratePreview(
     float filterStrength,
     float gamma,
     int gammaMode,
+    float oledGammaOutput,
     float lumaContrastStrength,
     float woledCrossTalkReduction,
     bool enableSubpixelHinting,
@@ -35,6 +36,7 @@ extern "C" __declspec(dllexport) bool GeneratePreview(
     cfg.filterStrength = filterStrength;
     cfg.gamma = gamma;
     cfg.gammaMode = static_cast<GammaMode>(gammaMode);
+    cfg.oledGammaOutput = oledGammaOutput;
     cfg.lumaContrastStrength = lumaContrastStrength;
     cfg.woledCrossTalkReduction = woledCrossTalkReduction;
     cfg.enableSubpixelHinting = enableSubpixelHinting;

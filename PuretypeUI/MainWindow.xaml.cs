@@ -39,6 +39,7 @@ namespace PuretypeUI
             float  filterStrength,
             float  gamma,
             int    gammaMode,
+            float  oledGammaOutput,
             float  lumaContrastStrength,
             float  woledCrossTalkReduction,
             bool   enableSubpixelHinting,
@@ -199,6 +200,7 @@ namespace PuretypeUI
 
             FilterStrengthSlider.Value       = Math.Clamp(ParseFloat(d, "general.filterstrength",         1.0f),  0.0, 5.0);
             GammaSlider.Value                = Math.Clamp(ParseFloat(d, "general.gamma",                  1.0f),  0.5, 3.0);
+            OledGammaOutputSlider.Value      = Math.Clamp(ParseFloat(d, "general.oledgammaoutput",        1.0f),  1.0, 2.0);
             SubpixelHintingCheck.IsChecked   = ParseBool (d, "general.enablesubpixelhinting",             true);
             FractionalPositioningCheck.IsChecked = ParseBool(d, "general.enablefractionalpositioning",    true);
             LumaContrastSlider.Value         = Math.Clamp(ParseFloat(d, "general.lumacontraststrength",   1.15f), 1.0, 3.0);
@@ -249,6 +251,7 @@ namespace PuretypeUI
             SetIniValue("general", "gammaMode",                  gammaTag);
             SetIniValue("general", "filterStrength",             F2(FilterStrengthSlider.Value));
             SetIniValue("general", "gamma",                      F2(GammaSlider.Value));
+            SetIniValue("general", "oledGammaOutput",            F2(OledGammaOutputSlider.Value));
             SetIniValue("general", "enableSubpixelHinting",      Bool(SubpixelHintingCheck.IsChecked     == true));
             SetIniValue("general", "enableFractionalPositioning", Bool(FractionalPositioningCheck.IsChecked == true));
             SetIniValue("general", "lumaContrastStrength",       F2(LumaContrastSlider.Value));
@@ -319,6 +322,7 @@ namespace PuretypeUI
                     (float)FilterStrengthSlider.Value,
                     (float)GammaSlider.Value,
                     gammaMode,
+                    (float)OledGammaOutputSlider.Value,
                     (float)LumaContrastSlider.Value,
                     (float)WoledCrosstalkSlider.Value,
                     SubpixelHintingCheck.IsChecked == true,
@@ -408,6 +412,7 @@ namespace PuretypeUI
             // Reset base parameters
             FilterStrengthSlider.Value = 1.0;
             GammaSlider.Value = 1.0;
+            OledGammaOutputSlider.Value = 1.0;
             
             SubpixelHintingCheck.IsChecked = true;
             FractionalPositioningCheck.IsChecked = true;
@@ -428,12 +433,14 @@ namespace PuretypeUI
             {
                 case "rwbg":
                 case "rgwb":
+                    OledGammaOutputSlider.Value = 1.20;
                     WoledCrosstalkSlider.Value = 0.10;
                     LumaContrastSlider.Value = 1.25;
                     StemDarkeningCheck.IsChecked = true;
                     StemStrengthSlider.Value = 0.20;
                     break;
                 case "qd_oled_gen1":
+                    OledGammaOutputSlider.Value = 1.15;
                     WoledCrosstalkSlider.Value = 0.00;
                     LumaContrastSlider.Value = 1.15;
                     FilterStrengthSlider.Value = 1.10; // Extra smooth for triangle matrix
@@ -442,6 +449,7 @@ namespace PuretypeUI
                     break;
                 case "qd_oled_gen3":
                 case "qd_oled_gen4":
+                    OledGammaOutputSlider.Value = 1.15;
                     WoledCrosstalkSlider.Value = 0.00;
                     LumaContrastSlider.Value = 1.15;
                     StemDarkeningCheck.IsChecked = true;

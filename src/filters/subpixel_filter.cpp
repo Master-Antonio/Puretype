@@ -205,6 +205,7 @@ namespace puretype
         result.width = pixelWidth;
         result.height = height;
         result.pitch = pixelWidth * 4; // 32bpp packed; always 4-byte aligned
+        result.fontWeight = glyph.fontWeight;
 
         if (pixelWidth <= 0 || height <= 0) return result;
 
@@ -331,11 +332,12 @@ namespace puretype
 
         RGBABitmap result;
         result.width = pixelWidth;
-        result.height = height;
+        result.height = glyph.height;
         result.pitch = pixelWidth * 4;
+        result.fontWeight = glyph.fontWeight;
 
         if (pixelWidth <= 0 || height <= 0) return result;
-        result.data.resize(result.pitch * height, 0);
+        result.data.resize(result.pitch * result.height, 0);
 
         const float emSize = static_cast<float>(glyph.pixelSize > 0 ? glyph.pixelSize : height);
         const float darkenAmount = cfg.stemDarkeningEnabled

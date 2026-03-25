@@ -801,6 +801,23 @@ namespace puretype::hooks
                 finalCovG = scurve(finalCovG);
                 finalCovB = scurve(finalCovB);
 
+                // -------------------------------------------------------------
+                // Point 2: OLED gamma correction
+                // OLED black floor = 0 (vs LCD ~0.2 cd/m²). Mid-coverage text appears
+                // lighter than intended. Power > 1.0 darkens mid-tones.
+                // cfg.oledGammaOutput: 1.0 = off, 1.2 recommended for WOLED, 1.15 for QD-OLED.
+                if (cfg.oledGammaOutput > 1.001f)
+                {
+                    finalCovR = std::pow(finalCovR, cfg.oledGammaOutput);
+                    finalCovG = std::pow(finalCovG, cfg.oledGammaOutput);
+                    finalCovB = std::pow(finalCovB, cfg.oledGammaOutput);
+                }
+
+                // Prepare for Alpha Blend: scale up to 255.
+                finalCovR = std::clamp(finalCovR, 0.0f, 1.0f);
+                finalCovG = std::clamp(finalCovG, 0.0f, 1.0f);
+                finalCovB = std::clamp(finalCovB, 0.0f, 1.0f);
+
                 // --- final per-channel blend  bg → textColor ----------
                 const float bgR_lin = rowBgR[col];
                 const float bgG_lin = rowBgG[col];

@@ -131,6 +131,10 @@ namespace puretype
         // extreme over/under-exposure that corrupts visual output
         m_data.gamma = std::clamp(m_data.gamma, 0.5f, 3.0f);
 
+        try { m_data.oledGammaOutput = std::stof(GetValue("general", "oledgammaoutput", "1.0")); }
+        catch (...) { m_data.oledGammaOutput = 1.0f; }
+        m_data.oledGammaOutput = std::clamp(m_data.oledGammaOutput, 1.0f, 2.0f);
+
         std::string hintingStr = ToLower(GetValue("general", "enablesubpixelhinting", "true"));
         m_data.enableSubpixelHinting =
             (hintingStr == "true" || hintingStr == "1" || hintingStr == "yes");

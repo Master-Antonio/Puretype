@@ -429,7 +429,7 @@
                         </StackPanel>
                         <Border Background="#07192A" BorderBrush="#00D8FF" BorderThickness="1"
                                 CornerRadius="4" Padding="8,3" Margin="14,0,0,0" VerticalAlignment="Center">
-                            <TextBlock Text="v0.0.7" FontFamily="Consolas, Courier New"
+                            <TextBlock Text="v0.0.8" FontFamily="Consolas, Courier New"
                                        FontSize="11" Foreground="#00D8FF" FontWeight="Bold"/>
                         </Border>
                     </StackPanel>
@@ -599,6 +599,24 @@
                                                 Margin="0,8,0,14"
                                                 TickFrequency="0.05" IsSnapToTickEnabled="True"
                                                 ValueChanged="Setting_Changed_Slider"/>
+
+                                        <!-- OLED Gamma Output -->
+                                        <Grid>
+                                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                                            <TextBlock Text="OLED gamma correction (crush glowing mid-tones)" FontFamily="Segoe UI Variable Display, Segoe UI"
+                                                       FontSize="13" Foreground="#9098BC" VerticalAlignment="Center"/>
+                                            <Border Grid.Column="1" Background="#06182A" BorderBrush="#0A2A40" BorderThickness="1" CornerRadius="4" Padding="8,3">
+                                                <TextBlock Text="{Binding Value, ElementName=OledGammaOutputSlider, StringFormat={}{0:F2}}"
+                                                           FontFamily="Consolas, Courier New" FontSize="12" Foreground="#00D8FF" FontWeight="Bold"/>
+                                            </Border>
+                                        </Grid>
+                                        <Slider x:Name="OledGammaOutputSlider" Style="{StaticResource S}"
+                                                Minimum="1.0" Maximum="2.0" Value="1.0"
+                                                Margin="0,8,0,2"
+                                                TickFrequency="0.05" IsSnapToTickEnabled="True"
+                                                ValueChanged="Setting_Changed_Slider"/>
+                                        <TextBlock Text="1.00 = off (LCD-like)    1.15-1.20 = recommended for OLED"
+                                                   FontFamily="Consolas, Courier New" FontSize="11" Foreground="#545478" Margin="0,0,0,14"/>
 
                                         <!-- Stem darkening -->
                                         <CheckBox x:Name="StemDarkeningCheck" Style="{StaticResource CK}"

@@ -26,6 +26,7 @@ namespace puretype
         GammaMode gammaMode = GammaMode::SRGB;
         float filterStrength = 1.0f;
         float gamma = 1.0f;
+        float oledGammaOutput = 1.0f;
         bool enableSubpixelHinting = true;
         bool enableFractionalPositioning = true;
         float lodThresholdSmall = 12.0f;

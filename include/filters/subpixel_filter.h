@@ -14,6 +14,7 @@ namespace puretype
         int width = 0;
         int height = 0;
         int pitch = 0;
+        uint16_t fontWeight = 400;
         std::vector<uint8_t> data;
     };
 
