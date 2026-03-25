@@ -5,12 +5,14 @@
 #include <MinHook.h>
 #include <Windows.h>
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <string>
 #include <vector>
 #include <cstring>
 
 #include "color_math.h"
+#include "render_optimizer.h"
 #include "stem_darkening.h"
 
 extern void PureTypeLog(const char* fmt, ...);
@@ -316,6 +318,7 @@ namespace puretype::hooks
         const bool qdGen4 = (cfg.panelType == PanelType::QD_OLED_GEN4);
         const bool qdPanel = qdGen1 || qdGen3 || qdGen4;
         const bool rgwbPanel = (cfg.panelType == PanelType::RGWB);
+        const EdgeAdaptiveParams edgeParams = GetEdgeAdaptiveParams(qdPanel);
 
         // Stem darkening — matches FreeType path (subpixel_filter.cpp)
         const float emSize = static_cast<float>(h);
@@ -356,10 +359,23 @@ namespace puretype::hooks
         else if (h <= 32) chromaKeepBase = qdPanel ? 0.80f : 0.82f;
         else chromaKeepBase = qdPanel ? 0.83f : 0.85f;
 
+        // Font-weight aware adjustment: thin fonts are more sensitive to fringing.
+        if (fontWeight > 0)
+        {
+            const float weightNorm = std::clamp(static_cast<float>(fontWeight) / 400.0f, 0.5f, 2.0f);
+            chromaKeepBase *= (0.85f + 0.15f * weightNorm);
+        }
+
         // DPI-aware chromaKeep reduction (#7).
         // At high DPI, reduce chroma to minimize fringing before reducing filter strength.
         if (dpiScale < 1.0f)
             chromaKeepBase *= 0.4f + 0.6f * dpiScale; // ramps from base to 40% of base
+        const float toneStrength = std::clamp(cfg.filterStrength * dpiScale, 0.0f, 5.0f);
+
+        ConstrainedChromaFastPath fastPath;
+        fastPath.maxEdgeRisk = tinyText ? 0.05f : 0.08f;
+        fastPath.maxChannelSpread = tinyText ? 0.05f : 0.06f;
+        fastPath.maxLumaDelta = tinyText ? 0.0025f : 0.0035f;
 
         // Output buffer — zero-initialised: alpha=0 for all pixels by default.
         //
@@ -777,21 +793,44 @@ namespace puretype::hooks
                     finalCovB = std::max(alpha_B, alpha_W);
                 }
 
-                // --- chromaKeep (BT.709 luma anchor) ------------------
-                // Adaptive modulation (#4): scale chromaKeep by local contrast.
-                // High contrast (dark mode: light text on dark bg) → more chroma.
-                // Low contrast (near-neutral text on light bg) → less chroma.
-                const float bgLuma = 0.2126f * rowBgR[col]
-                    + 0.7152f * rowBgG[col]
-                    + 0.0722f * rowBgB[col];
-                const float localContrast = std::abs(linTextLuma - bgLuma);
-                const float chromaKeep = std::clamp(
-                    chromaKeepBase * (0.7f + 0.3f * localContrast),
-                    0.0f, 1.0f);
+                const float baseCovR = std::clamp(finalCovR, 0.0f, 1.0f);
+                const float baseCovG = std::clamp(finalCovG, 0.0f, 1.0f);
+                const float baseCovB = std::clamp(finalCovB, 0.0f, 1.0f);
 
                 const float yCov = 0.2126f * finalCovR
                     + 0.7152f * finalCovG
                     + 0.0722f * finalCovB;
+
+                // --- edge/fringing risk model -------------------------
+                // Estimate risk from local luminance gradients (vertical edges are
+                // more sensitive for subpixel fringing) and channel spread.
+                const int leftCol = std::max(col - 1, 0);
+                const int rightCol = std::min(col + 1, w - 1);
+                const float yLeft = 0.2126f * rowSmR[leftCol]
+                    + 0.7152f * rowSmG[leftCol]
+                    + 0.0722f * rowSmB[leftCol];
+                const float yRight = 0.2126f * rowSmR[rightCol]
+                    + 0.7152f * rowSmG[rightCol]
+                    + 0.0722f * rowSmB[rightCol];
+                const float yUp = hasPrevRow
+                                      ? (0.2126f * prevSmR[col] + 0.7152f * prevSmG[col] + 0.0722f * prevSmB[col])
+                                      : yCov;
+
+                const float gradX = std::abs(yRight - yLeft);
+                const float gradY = std::abs(yCov - yUp);
+                const float channelSpread = std::max({finalCovR, finalCovG, finalCovB})
+                    - std::min({finalCovR, finalCovG, finalCovB});
+                const float thinness = std::clamp(1.0f - yCov * 2.0f, 0.0f, 1.0f);
+                const float edgeRisk = ComputeEdgeRisk(gradX, gradY, channelSpread, thinness, edgeParams);
+
+                // --- chromaKeep (BT.709 luma anchor) ------------------
+                // Contrast/size-aware base + edge-adaptive limiter.
+                const float bgLuma = 0.2126f * rowBgR[col]
+                    + 0.7152f * rowBgG[col]
+                    + 0.0722f * rowBgB[col];
+                const float localContrast = std::abs(linTextLuma - bgLuma);
+                const float chromaKeep =
+                    ComputeAdaptiveChromaKeep(chromaKeepBase, localContrast, edgeRisk, edgeParams);
                 finalCovR = yCov + (finalCovR - yCov) * chromaKeep;
                 finalCovG = yCov + (finalCovG - yCov) * chromaKeep;
                 finalCovB = yCov + (finalCovB - yCov) * chromaKeep;
@@ -800,6 +839,7 @@ namespace puretype::hooks
                 finalCovR = scurve(finalCovR);
                 finalCovG = scurve(finalCovG);
                 finalCovB = scurve(finalCovB);
+                float targetY = scurve(yCov);
 
                 // -------------------------------------------------------------
                 // Point 2: OLED gamma correction
@@ -811,12 +851,28 @@ namespace puretype::hooks
                     finalCovR = std::pow(finalCovR, cfg.oledGammaOutput);
                     finalCovG = std::pow(finalCovG, cfg.oledGammaOutput);
                     finalCovB = std::pow(finalCovB, cfg.oledGammaOutput);
+                    targetY = std::pow(targetY, cfg.oledGammaOutput);
                 }
 
-                // Prepare for Alpha Blend: scale up to 255.
-                finalCovR = std::clamp(finalCovR, 0.0f, 1.0f);
-                finalCovG = std::clamp(finalCovG, 0.0f, 1.0f);
-                finalCovB = std::clamp(finalCovB, 0.0f, 1.0f);
+                if (std::abs(toneStrength - 1.0f) > 0.001f)
+                {
+                    finalCovR = std::clamp(baseCovR + (finalCovR - baseCovR) * toneStrength, 0.0f, 1.0f);
+                    finalCovG = std::clamp(baseCovG + (finalCovG - baseCovG) * toneStrength, 0.0f, 1.0f);
+                    finalCovB = std::clamp(baseCovB + (finalCovB - baseCovB) * toneStrength, 0.0f, 1.0f);
+                    targetY = std::clamp(yCov + (targetY - yCov) * toneStrength, 0.0f, 1.0f);
+                }
+
+                const std::array<float, 3> solved = ApplyConstrainedChromaOptimization(
+                    {finalCovR, finalCovG, finalCovB},
+                    targetY,
+                    edgeRisk,
+                    localContrast,
+                    channelSpread,
+                    edgeParams,
+                    fastPath);
+                finalCovR = solved[0];
+                finalCovG = solved[1];
+                finalCovB = solved[2];
 
                 // --- final per-channel blend  bg → textColor ----------
                 const float bgR_lin = rowBgR[col];
@@ -909,9 +965,25 @@ namespace puretype::hooks
         if (!lpString || cbCount == 0)
             return g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
 
-        const auto& cfg = Config::Instance().Data();
+        // Resolve target Monitor for OLED profile overrides
+        std::string monitorName = "";
+        if (HWND hwnd = WindowFromDC(hdc); hwnd)
+        {
+            if (HMONITOR hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST); hmon)
+            {
+                MONITORINFOEXA mi;
+                mi.cbSize = sizeof(mi);
+                if (GetMonitorInfoA(hmon, &mi))
+                {
+                    monitorName = mi.szDevice;
+                }
+            }
+        }
+
+        const auto& cfg = Config::Instance().GetData(monitorName);
         if (cfg.filterStrength <= 0.0f)
             return g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
+        initColorMathLUTs(cfg.gammaMode == GammaMode::OLED);
 
         // DPI-aware graduated fade-out (improvement #7).
         // Cached per-thread to avoid calling GetDeviceCaps on every ExtTextOutW.

@@ -19,7 +19,7 @@ namespace
 
     void LogInit(const std::string& path)
     {
-        if (!puretype::Config::Instance().Data().debugEnabled) return;
+        if (!puretype::Config::Instance().GetData("").debugEnabled) return;
         std::lock_guard lock(g_logMutex);
         fopen_s(&g_logFile, path.c_str(), "w");
     }
@@ -35,7 +35,7 @@ namespace
     }
 
 
-    bool IsProcessBlacklisted()
+    std::string GetExeName()
     {
         char exePathA[MAX_PATH] = {};
         GetModuleFileNameA(nullptr, exePathA, MAX_PATH);
@@ -45,10 +45,14 @@ namespace
         {
             if (*p == '\\' || *p == '/') exeName = p + 1;
         }
+        return std::string(exeName);
+    }
 
-        for (const auto& item : puretype::Config::Instance().Data().blacklist)
+    bool IsProcessBlacklisted(const std::string& exeName)
+    {
+        for (const auto& item : puretype::Config::Instance().GetData("").blacklist)
         {
-            if (_stricmp(exeName, item.c_str()) == 0)
+            if (_stricmp(exeName.c_str(), item.c_str()) == 0)
             {
                 return true;
             }
@@ -97,20 +101,22 @@ BOOL APIENTRY DllMain(const HMODULE hModule, const DWORD reason, LPVOID)
 
             std::string dllDir = GetDllDirectory(hModule);
             std::string iniPath = dllDir + "puretype.ini";
-            puretype::Config::Instance().LoadFromFile(iniPath);
 
-            if (IsProcessBlacklisted())
+            std::string exeName = GetExeName();
+            puretype::Config::Instance().LoadFromFile(iniPath, exeName);
+
+            if (IsProcessBlacklisted(exeName))
             {
                 return FALSE;
             }
 
             puretype::initColorMathLUTs(
-                puretype::Config::Instance().Data().gammaMode == puretype::GammaMode::OLED);
+                puretype::Config::Instance().GetData("").gammaMode == puretype::GammaMode::OLED);
 
-            if (puretype::Config::Instance().Data().debugEnabled)
+            if (puretype::Config::Instance().GetData("").debugEnabled)
             {
                 const std::string logPath = dllDir +
-                    puretype::Config::Instance().Data().logFile;
+                    puretype::Config::Instance().GetData("").logFile;
                 LogInit(logPath);
 
                 wchar_t hostExe[MAX_PATH] = {};
@@ -121,33 +127,33 @@ BOOL APIENTRY DllMain(const HMODULE hModule, const DWORD reason, LPVOID)
                             PURETYPE_VERSION_PATCH);
                 PureTypeLog("Host process: %ls", hostExe);
                 auto panelName = "RWBG";
-                if (puretype::Config::Instance().Data().panelType == puretype::PanelType::QD_OLED_GEN1)
+                if (puretype::Config::Instance().GetData("").panelType == puretype::PanelType::QD_OLED_GEN1)
                     panelName = "QD_OLED_GEN1";
-                else if (puretype::Config::Instance().Data().panelType == puretype::PanelType::QD_OLED_GEN3)
+                else if (puretype::Config::Instance().GetData("").panelType == puretype::PanelType::QD_OLED_GEN3)
                     panelName = "QD_OLED_GEN3";
-                else if (puretype::Config::Instance().Data().panelType == puretype::PanelType::QD_OLED_GEN4)
+                else if (puretype::Config::Instance().GetData("").panelType == puretype::PanelType::QD_OLED_GEN4)
                     panelName = "QD_OLED_GEN4";
-                else if (puretype::Config::Instance().Data().panelType == puretype::PanelType::RGWB)
+                else if (puretype::Config::Instance().GetData("").panelType == puretype::PanelType::RGWB)
                     panelName = "RGWB";
                 PureTypeLog("Panel type: %s", panelName);
                 PureTypeLog("Filter strength: %.2f",
-                            puretype::Config::Instance().Data().filterStrength);
+                            puretype::Config::Instance().GetData("").filterStrength);
                 PureTypeLog("Gamma: %.2f",
-                            puretype::Config::Instance().Data().gamma);
+                            puretype::Config::Instance().GetData("").gamma);
                 PureTypeLog("Subpixel hinting: %s",
-                            puretype::Config::Instance().Data().enableSubpixelHinting ? "ON" : "OFF");
+                            puretype::Config::Instance().GetData("").enableSubpixelHinting ? "ON" : "OFF");
                 PureTypeLog("Fractional positioning: %s",
-                            puretype::Config::Instance().Data().enableFractionalPositioning ? "ON" : "OFF");
+                            puretype::Config::Instance().GetData("").enableFractionalPositioning ? "ON" : "OFF");
                 PureTypeLog("LOD thresholds: small %.2f / large %.2f",
-                            puretype::Config::Instance().Data().lodThresholdSmall,
-                            puretype::Config::Instance().Data().lodThresholdLarge);
+                            puretype::Config::Instance().GetData("").lodThresholdSmall,
+                            puretype::Config::Instance().GetData("").lodThresholdLarge);
                 PureTypeLog("WOLED cross-talk reduction: %.3f",
-                            puretype::Config::Instance().Data().woledCrossTalkReduction);
+                            puretype::Config::Instance().GetData("").woledCrossTalkReduction);
                 PureTypeLog("Luma contrast strength: %.2f",
-                            puretype::Config::Instance().Data().lumaContrastStrength);
+                            puretype::Config::Instance().GetData("").lumaContrastStrength);
                 PureTypeLog("Stem darkening: %s (strength %.2f)",
-                            puretype::Config::Instance().Data().stemDarkeningEnabled ? "ON" : "OFF",
-                            puretype::Config::Instance().Data().stemDarkeningStrength);
+                            puretype::Config::Instance().GetData("").stemDarkeningEnabled ? "ON" : "OFF",
+                            puretype::Config::Instance().GetData("").stemDarkeningStrength);
             }
 
             MH_STATUS mhStatus = MH_Initialize();

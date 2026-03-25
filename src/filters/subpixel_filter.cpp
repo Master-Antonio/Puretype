@@ -44,6 +44,9 @@ namespace puretype
             uint16_t lodLargeQ = 0;
             uint16_t crossTalkQ = 0;
             uint16_t lumaContrastQ = 0;
+            uint16_t oledGammaOutputQ = 0;
+            uint16_t textContrastHintQ = 0;
+            uint16_t dpiScaleHintQ = 0;
 
             bool operator==(const FilterCacheKey& o) const
             {
@@ -61,7 +64,10 @@ namespace puretype
                     lodSmallQ == o.lodSmallQ &&
                     lodLargeQ == o.lodLargeQ &&
                     crossTalkQ == o.crossTalkQ &&
-                    lumaContrastQ == o.lumaContrastQ;
+                    lumaContrastQ == o.lumaContrastQ &&
+                    oledGammaOutputQ == o.oledGammaOutputQ &&
+                    textContrastHintQ == o.textContrastHintQ &&
+                    dpiScaleHintQ == o.dpiScaleHintQ;
             }
         };
 
@@ -84,6 +90,9 @@ namespace puretype
                 h ^= std::hash<uint16_t>{}(k.lodLargeQ) + 0x9e3779b9 + (h << 6) + (h >> 2);
                 h ^= std::hash<uint16_t>{}(k.crossTalkQ) + 0x9e3779b9 + (h << 6) + (h >> 2);
                 h ^= std::hash<uint16_t>{}(k.lumaContrastQ) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                h ^= std::hash<uint16_t>{}(k.oledGammaOutputQ) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                h ^= std::hash<uint16_t>{}(k.textContrastHintQ) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                h ^= std::hash<uint16_t>{}(k.dpiScaleHintQ) + 0x9e3779b9 + (h << 6) + (h >> 2);
                 return h;
             }
         };
@@ -159,7 +168,8 @@ namespace puretype
             key.phaseY = static_cast<uint8_t>(glyph.phaseY % 3u);
             key.panelType = static_cast<uint8_t>(cfg.panelType);
             key.flags = (cfg.stemDarkeningEnabled ? 1u : 0u)
-                | (cfg.enableFractionalPositioning ? 2u : 0u);
+                | (cfg.enableFractionalPositioning ? 2u : 0u)
+                | (cfg.textContrastHint >= 0.0f ? 4u : 0u);
             key.filterStrengthQ = QuantizeFloat(cfg.filterStrength, 1024.0f);
             key.gammaQ = QuantizeFloat(cfg.gamma, 1024.0f);
             key.stemQ = QuantizeFloat(cfg.stemDarkeningStrength, 1024.0f);
@@ -167,6 +177,9 @@ namespace puretype
             key.lodLargeQ = QuantizeFloat(cfg.lodThresholdLarge, 64.0f);
             key.crossTalkQ = QuantizeFloat(cfg.woledCrossTalkReduction, 4096.0f);
             key.lumaContrastQ = QuantizeFloat(cfg.lumaContrastStrength, 1024.0f);
+            key.oledGammaOutputQ = QuantizeFloat(cfg.oledGammaOutput, 1024.0f);
+            key.textContrastHintQ = QuantizeFloat(std::max(0.0f, cfg.textContrastHint), 1024.0f);
+            key.dpiScaleHintQ = QuantizeFloat(cfg.dpiScaleHint, 1024.0f);
             return key;
         }
     } // namespace

@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <list>
 #include <mutex>
+#include "config.h"
 
 #include <ft2build.h>
 #include FT_FREETYPE_H
@@ -119,6 +120,7 @@ namespace puretype
         const GlyphBitmap* RasterizeGlyph(const std::string& fontPath,
                                           uint32_t glyphIndex,
                                           uint32_t pixelSize,
+                                          const ConfigData& cfg,
                                           uint16_t fontWeight = 400,
                                           uint8_t phaseX = 0,
                                           uint8_t phaseY = 0);
@@ -135,6 +137,7 @@ namespace puretype
             const uint16_t* glyphIndices,
             uint32_t glyphCount,
             uint32_t pixelSize,
+            const ConfigData& cfg,
             const int* lpDx = nullptr,
             uint16_t fontWeight = 400,
             const uint8_t* fractionalPhaseX = nullptr,

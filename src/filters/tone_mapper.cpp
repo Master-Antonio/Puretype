@@ -1,8 +1,11 @@
 #include "filters/subpixel_filter.h"
 #include "filters/tone_mapper.h"
 #include "color_math.h"
-#include <cmath>
+#include "render_optimizer.h"
+
 #include <algorithm>
+#include <array>
+#include <cmath>
 #include <vector>
 
 namespace puretype
@@ -14,20 +17,22 @@ namespace puretype
         const bool qdPanel = (cfg.panelType == PanelType::QD_OLED_GEN1 ||
             cfg.panelType == PanelType::QD_OLED_GEN3 ||
             cfg.panelType == PanelType::QD_OLED_GEN4);
+        const EdgeAdaptiveParams edgeParams = GetEdgeAdaptiveParams(qdPanel);
+
         const bool tinyText = (bitmap.height <= 18);
         const bool smallText = (bitmap.height <= 24);
         const float sizeBoost = std::clamp((24.0f - static_cast<float>(bitmap.height)) / 24.0f, 0.0f, 1.0f);
 
         const float contrastStrength = cfg.lumaContrastStrength;
+        const float toneStrength = std::clamp(cfg.filterStrength, 0.0f, 5.0f);
 
-        // --- CPU OPTIMIZATION: LUT for S-curve ---
+        // S-curve parameters.
         float expBase = (qdPanel ? 1.01f : 1.03f) * (1.0f + (contrastStrength - 1.0f) * 0.5f);
 
-        // Reduce S-curve aggression on thin fonts to prevent crushing delicate stems
-        // that were specifically thickened by the Stem Darkening pass.
+        // Reduce S-curve aggression on thin fonts.
         if (cfg.stemDarkeningEnabled && bitmap.fontWeight < 400 && bitmap.fontWeight > 0)
         {
-            float weightFactor = static_cast<float>(bitmap.fontWeight) / 400.0f;
+            const float weightFactor = static_cast<float>(bitmap.fontWeight) / 400.0f;
             expBase = 1.0f + (expBase - 1.0f) * weightFactor;
         }
 
@@ -48,63 +53,82 @@ namespace puretype
             {
                 c = std::min(1.0f, c * finalGain);
             }
-            readabilityLUT[i] = std::clamp(c, 0.0f, 1.0f);
+            readabilityLUT[i] = Clamp01(c);
         }
 
-        auto applyReadabilityFast = [&](float c) -> float
+        auto applyReadabilityFast = [&](const float c) -> float
         {
-            const int idx = static_cast<int>(std::clamp(c, 0.0f, 1.0f) * (LUT_SIZE - 1) + 0.5f);
+            const int idx = static_cast<int>(Clamp01(c) * (LUT_SIZE - 1) + 0.5f);
             return readabilityLUT[idx];
         };
 
-
-        // chroma should be preserved on OLED panels.
-        //
-        // Root cause of the original bug: the values (0.18–0.35) were ported
-        // from an LCD ClearType tone-mapper, where chroma suppression is
-        // desirable — LCD subpixel rendering creates colour fringing that
-        // looks like an artifact on LCD screens. On OLED the situation is
-        // reversed: per-channel subpixel values ARE the rendering mechanism.
-        // Suppressing chroma to 18–35% of its original value means discarding
-        // 65–82% of the subpixel information computed by the filter — making
-        // the output nearly greyscale and visually identical to plain GDI text.
-        //
-        // Correct approach for OLED:
-        //   - Preserve as much chroma as possible (0.70–0.85).
-        //   - Tiny text benefits from slightly less chroma because at ≤18 px
-        //     the subpixel cells are close to pixel size and fringing reads as
-        //     a colour defect rather than as sharpening — 0.70 is still high
-        //     but gives a small margin against the worst offenders.
-        //   - Large text (>32 px) should get MAXIMUM chroma preservation (0.85)
-        //     because stems are wide enough that each subpixel column maps to
-        //     a distinct color channel with zero overlap — full chroma is
-        //     exactly correct here.
-        //
-        // The chromaKeep = 1.0 extreme would give raw subpixel output with no
-        // luma anchoring at all; values 0.70–0.85 strike the balance between
-        // colour accuracy and perceptual neutrality on mixed-colour text.
-        float chromaKeep;
+        // Base chroma policy by glyph size.
+        float chromaKeepBase;
         if (tinyText)
         {
-            // ≤18 px: slightly conservative to avoid colour defects on very
-            // small glyphs where subpixel cells are near pixel-sized.
-            chromaKeep = qdPanel ? 0.70f : 0.72f;
+            chromaKeepBase = qdPanel ? 0.70f : 0.72f;
         }
         else if (smallText)
         {
-            // 19–24 px: main body text range, full subpixel benefit.
-            chromaKeep = qdPanel ? 0.75f : 0.77f;
+            chromaKeepBase = qdPanel ? 0.75f : 0.77f;
         }
         else if (bitmap.height <= 32)
         {
-            // 25–32 px: medium text, stems wide enough for clean subpixel.
-            chromaKeep = qdPanel ? 0.80f : 0.82f;
+            chromaKeepBase = qdPanel ? 0.80f : 0.82f;
         }
         else
         {
-            // >32 px: large / heading text — preserve maximum subpixel colour.
-            chromaKeep = qdPanel ? 0.83f : 0.85f;
+            chromaKeepBase = qdPanel ? 0.83f : 0.85f;
         }
+
+        // Font weight aware adjustment: thinner glyphs tolerate slightly less chroma.
+        if (bitmap.fontWeight > 0)
+        {
+            const float weightNorm = std::clamp(static_cast<float>(bitmap.fontWeight) / 400.0f, 0.5f, 2.0f);
+            chromaKeepBase *= (0.85f + 0.15f * weightNorm);
+        }
+
+        // High-DPI attenuation hint from hooks.
+        const float dpiScaleHint = std::clamp(cfg.dpiScaleHint, 0.0f, 1.0f);
+        if (dpiScaleHint < 1.0f)
+        {
+            chromaKeepBase *= 0.4f + 0.6f * dpiScaleHint;
+        }
+
+        // Contrast hint from hooks (for DWrite proxy and preview consistency).
+        const float contrastHint = (cfg.textContrastHint >= 0.0f)
+                                       ? std::clamp(cfg.textContrastHint, 0.0f, 1.0f)
+                                       : 1.0f;
+        chromaKeepBase *= 0.7f + 0.3f * contrastHint;
+        chromaKeepBase = Clamp01(chromaKeepBase);
+
+        ConstrainedChromaFastPath fastPath;
+        fastPath.maxEdgeRisk = tinyText ? 0.05f : 0.08f;
+        fastPath.maxChannelSpread = tinyText ? 0.05f : 0.06f;
+        fastPath.maxLumaDelta = tinyText ? 0.0025f : 0.0035f;
+
+        // Precompute luminance map from current per-channel masks.
+        std::vector<float> yMap(static_cast<size_t>(bitmap.width) * bitmap.height, 0.0f);
+        for (int row = 0; row < bitmap.height; ++row)
+        {
+            const uint8_t* rowData = bitmap.data.data() + row * bitmap.pitch;
+            for (int col = 0; col < bitmap.width; ++col)
+            {
+                const uint8_t* px = rowData + col * 4;
+                const float covB = sRGBToLinear(px[0]);
+                const float covG = sRGBToLinear(px[1]);
+                const float covR = sRGBToLinear(px[2]);
+                yMap[static_cast<size_t>(row) * bitmap.width + col] =
+                    0.2126f * covR + 0.7152f * covG + 0.0722f * covB;
+            }
+        }
+
+        auto sampleY = [&](const int y, const int x) -> float
+        {
+            const int clampedY = std::clamp(y, 0, bitmap.height - 1);
+            const int clampedX = std::clamp(x, 0, bitmap.width - 1);
+            return yMap[static_cast<size_t>(clampedY) * bitmap.width + clampedX];
+        };
 
         for (int row = 0; row < bitmap.height; ++row)
         {
@@ -120,12 +144,29 @@ namespace puretype
 
                 if (covR <= 0.001f && covG <= 0.001f && covB <= 0.001f) continue;
 
-                // Use BT.709 luminance weights instead of the ad-hoc
-                // 0.72*max + 0.28*avg formula. BT.709 correctly weights the
-                // perceptual contribution of each channel for luma extraction,
-                // which is critical for coloured text on OLED panels.
-                float yCov = 0.2126f * covR + 0.7152f * covG + 0.0722f * covB;
+                const float baseCovR = covR;
+                const float baseCovG = covG;
+                const float baseCovB = covB;
+                const float yCov = sampleY(row, col);
 
+                // Edge/fringing risk model:
+                // - vertical edges (high d/dx) are the most sensitive on stripe-based mapping,
+                // - thin coverage areas are more vulnerable,
+                // - large per-channel spread indicates chroma stress.
+                const float yL = sampleY(row, col - 1);
+                const float yR = sampleY(row, col + 1);
+                const float yU = sampleY(row - 1, col);
+                const float yD = sampleY(row + 1, col);
+
+                const float gradX = std::abs(yR - yL);
+                const float gradY = std::abs(yD - yU);
+                const float channelSpread = std::max({covR, covG, covB}) - std::min({covR, covG, covB});
+                const float thinness = Clamp01(1.0f - yCov * 2.0f);
+                const float edgeRisk = ComputeEdgeRisk(gradX, gradY, channelSpread, thinness, edgeParams);
+
+                // Edge-adaptive chroma limiting: preserve chroma except on risky edges.
+                const float chromaKeep =
+                    ComputeAdaptiveChromaKeep(chromaKeepBase, contrastHint, edgeRisk, edgeParams);
                 covR = yCov + (covR - yCov) * chromaKeep;
                 covG = yCov + (covG - yCov) * chromaKeep;
                 covB = yCov + (covB - yCov) * chromaKeep;
@@ -134,13 +175,36 @@ namespace puretype
                 covG = applyReadabilityFast(covG);
                 covB = applyReadabilityFast(covB);
 
-                // Alpha must be derived from the sRGB-encoded byte values,
-                // not from linear-space floats. The downstream D2D compositing path
-                // uses DXGI_FORMAT_B8G8R8A8_UNORM with D2D1_ALPHA_MODE_PREMULTIPLIED,
-                // which requires color_byte <= alpha_byte for all channels.
-                uint8_t byteB = linearToSRGB(covB);
-                uint8_t byteG = linearToSRGB(covG);
-                uint8_t byteR = linearToSRGB(covR);
+                float targetY = applyReadabilityFast(yCov);
+
+                if (cfg.oledGammaOutput > 1.001f)
+                {
+                    covR = std::pow(covR, cfg.oledGammaOutput);
+                    covG = std::pow(covG, cfg.oledGammaOutput);
+                    covB = std::pow(covB, cfg.oledGammaOutput);
+                    targetY = std::pow(targetY, cfg.oledGammaOutput);
+                }
+
+                if (std::abs(toneStrength - 1.0f) > 0.001f)
+                {
+                    covR = Clamp01(baseCovR + (covR - baseCovR) * toneStrength);
+                    covG = Clamp01(baseCovG + (covG - baseCovG) * toneStrength);
+                    covB = Clamp01(baseCovB + (covB - baseCovB) * toneStrength);
+                    targetY = Clamp01(yCov + (targetY - yCov) * toneStrength);
+                }
+
+                const std::array<float, 3> solved = ApplyConstrainedChromaOptimization(
+                    {covR, covG, covB},
+                    targetY,
+                    edgeRisk,
+                    contrastHint,
+                    channelSpread,
+                    edgeParams,
+                    fastPath);
+
+                const uint8_t byteR = linearToSRGB(solved[0]);
+                const uint8_t byteG = linearToSRGB(solved[1]);
+                const uint8_t byteB = linearToSRGB(solved[2]);
 
                 px[0] = byteB;
                 px[1] = byteG;

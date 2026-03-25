@@ -2,6 +2,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <mutex>
 
 namespace puretype
 {
@@ -33,6 +34,11 @@ namespace puretype
         float lodThresholdLarge = 24.0f;
         float woledCrossTalkReduction = 0.0f;
         float lumaContrastStrength = 2.0f;
+        // Optional runtime hints used by ToneMapper for adaptive chroma behavior.
+        // textContrastHint: [0..1], <0 disables the hint.
+        float textContrastHint = -1.0f;
+        // dpiScaleHint: [0..1], where 1.0 means no high-DPI attenuation.
+        float dpiScaleHint = 1.0f;
 
         bool stemDarkeningEnabled = true;
         float stemDarkeningStrength = 0.35f;
@@ -53,20 +59,29 @@ namespace puretype
     class Config
     {
     public:
-        bool LoadFromFile(const std::string& iniPath);
+        bool LoadFromFile(const std::string& iniPath, const std::string& processName);
 
-        const ConfigData& Data() const { return m_data; }
-        ConfigData& Data() { return m_data; }
+        // Returns thread-safe references to monitor-specific config overrides
+        const ConfigData& GetData(const std::string& monitorName = "");
 
         static Config& Instance();
 
     private:
-        ConfigData m_data;
+        std::string m_processName;
+        std::mutex m_mutex;
 
+        // Cache for loaded monitor-specific configs
+        std::unordered_map<std::string, ConfigData> m_monitorDataCache;
+
+        // Raw key-value parsed from INI
         std::unordered_map<std::string, std::string> m_values;
 
         void ParseLine(const std::string& line, std::string& currentSection);
-        std::string GetValue(const std::string& section, const std::string& key,
-                             const std::string& defaultVal) const;
+        
+        // Context-aware value fetcher (Process > Monitor > General)
+        std::string GetValue(const std::string& key, const std::string& defaultVal,
+                             const std::string& monitorName = "") const;
+
+        ConfigData ParseConfigData(const std::string& monitorName) const;
     };
 }

@@ -218,12 +218,11 @@ namespace puretype
         const std::string& fontPath,
         uint32_t glyphIndex,
         uint32_t pixelSize,
+        const ConfigData& cfg,
         uint16_t fontWeight,
         uint8_t phaseX,
         uint8_t phaseY)
     {
-        const auto& cfg = Config::Instance().Data();
-
         // Normalize phases to [0, kPhaseCount-1] = [0, 2].
         const uint8_t normPhaseX = NormalizePhase(phaseX);
         const uint8_t normPhaseY = NormalizePhase(phaseY);
@@ -439,6 +438,7 @@ namespace puretype
         const uint16_t* glyphIndices,
         uint32_t glyphCount,
         uint32_t pixelSize,
+        const ConfigData& cfg,
         const int* lpDx,
         uint16_t fontWeight,
         const uint8_t* fractionalPhaseX,
@@ -464,7 +464,7 @@ namespace puretype
                                        : 0;
 
             const GlyphBitmap* bmp = RasterizeGlyph(
-                fontPath, glyphIndices[i], pixelSize, fontWeight, phaseX, phaseY);
+                fontPath, glyphIndices[i], pixelSize, cfg, fontWeight, phaseX, phaseY);
             if (!bmp)
             {
                 if (lpDx) currentX += lpDx[i] * 3;

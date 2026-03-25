@@ -1,6 +1,7 @@
 #include "hooks/dwrite_hooks.h"
 
 #include "config.h"
+#include "color_math.h"
 #include "filters/subpixel_filter.h"
 #include "output/blender.h"
 #include "puretype.h"
@@ -16,6 +17,7 @@
 #include <dwrite_3.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cwctype>
@@ -120,12 +122,27 @@ namespace puretype::hooks
             return lowerPath.find(L"\\d2d1.dll") != std::wstring::npos;
         }
 
+        bool LooksLikeD2DComObject(IUnknown* object)
+        {
+            if (!object || !IsReadablePointer(object)) return false;
+
+            auto* vtable = *reinterpret_cast<void***>(object);
+            if (!vtable || !IsReadablePointer(vtable)) return false;
+
+            const void* queryInterface = vtable[0];
+            if (!queryInterface || !IsReadablePointer(queryInterface)) return false;
+
+            // Only call into objects whose COM vtable resolves to d2d1.dll.
+            // This avoids AVs when clientDrawingContext is a non-COM payload.
+            return IsFromD2DModule(queryInterface);
+        }
+
         ID2D1RenderTarget* TryGetD2DRenderTarget(void* clientDrawingContext)
         {
             if (!clientDrawingContext) return nullptr;
 
             auto* pUnk = static_cast<IUnknown*>(clientDrawingContext);
-            if (!IsReadablePointer(pUnk)) return nullptr;
+            if (!LooksLikeD2DComObject(pUnk)) return nullptr;
 
             // Try ID2D1DeviceContext first (D2D1.1+, most modern apps).
             ID2D1DeviceContext* deviceContext = nullptr;
@@ -144,6 +161,168 @@ namespace puretype::hooks
             }
 
             return nullptr;
+        }
+
+        bool ComputeGlyphRunSampleRectPx(const DWRITE_GLYPH_RUN& glyphRun,
+                                         const FLOAT baselineOriginX,
+                                         const FLOAT baselineOriginY,
+                                         const D2D1_MATRIX_3X2_F& transform,
+                                         const FLOAT dpiX,
+                                         const FLOAT dpiY,
+                                         RECT* outRect)
+        {
+            if (!outRect || glyphRun.glyphCount == 0 || !glyphRun.fontFace)
+            {
+                return false;
+            }
+
+            float runAdvance = 0.0f;
+            float minOffsetX = 0.0f;
+            float maxOffsetX = 0.0f;
+            float minOffsetY = 0.0f;
+            float maxOffsetY = 0.0f;
+            for (UINT32 i = 0; i < glyphRun.glyphCount; ++i)
+            {
+                const FLOAT advance = glyphRun.glyphAdvances
+                                          ? glyphRun.glyphAdvances[i]
+                                          : glyphRun.fontEmSize * 0.5f;
+                runAdvance += advance;
+
+                if (glyphRun.glyphOffsets)
+                {
+                    const FLOAT offsetX = glyphRun.glyphOffsets[i].advanceOffset;
+                    const FLOAT offsetY = glyphRun.glyphOffsets[i].ascenderOffset;
+                    minOffsetX = std::min(minOffsetX, offsetX);
+                    maxOffsetX = std::max(maxOffsetX, offsetX);
+                    minOffsetY = std::min(minOffsetY, offsetY);
+                    maxOffsetY = std::max(maxOffsetY, offsetY);
+                }
+            }
+
+            if (runAdvance <= 0.0f)
+            {
+                runAdvance = std::max(1.0f, glyphRun.fontEmSize);
+            }
+
+            DWRITE_FONT_METRICS metrics = {};
+            glyphRun.fontFace->GetMetrics(&metrics);
+            const float designUnits = std::max(1.0f, static_cast<float>(metrics.designUnitsPerEm));
+
+            float ascentDip = static_cast<float>(metrics.ascent) * glyphRun.fontEmSize / designUnits;
+            float descentDip = static_cast<float>(metrics.descent) * glyphRun.fontEmSize / designUnits;
+            if (ascentDip <= 0.0f || descentDip <= 0.0f)
+            {
+                ascentDip = glyphRun.fontEmSize * 0.80f;
+                descentDip = glyphRun.fontEmSize * 0.20f;
+            }
+
+            const float marginX = std::max(1.0f, glyphRun.fontEmSize * 0.30f);
+            const float marginY = std::max(1.0f, glyphRun.fontEmSize * 0.25f);
+
+            const float leftDip = baselineOriginX + minOffsetX - marginX;
+            const float rightDip = baselineOriginX + runAdvance + maxOffsetX + marginX;
+            const float topDip = baselineOriginY - ascentDip - maxOffsetY - marginY;
+            const float bottomDip = baselineOriginY + descentDip - minOffsetY + marginY;
+
+            if (!(rightDip > leftDip) || !(bottomDip > topDip))
+            {
+                return false;
+            }
+
+            auto transformPoint = [&transform](const float x, const float y) -> std::array<float, 2>
+            {
+                return {
+                    x * transform._11 + y * transform._21 + transform._31,
+                    x * transform._12 + y * transform._22 + transform._32
+                };
+            };
+
+            const auto p0 = transformPoint(leftDip, topDip);
+            const auto p1 = transformPoint(rightDip, topDip);
+            const auto p2 = transformPoint(leftDip, bottomDip);
+            const auto p3 = transformPoint(rightDip, bottomDip);
+
+            const float minDipX = std::min({p0[0], p1[0], p2[0], p3[0]});
+            const float maxDipX = std::max({p0[0], p1[0], p2[0], p3[0]});
+            const float minDipY = std::min({p0[1], p1[1], p2[1], p3[1]});
+            const float maxDipY = std::max({p0[1], p1[1], p2[1], p3[1]});
+
+            const float dipToPxX = std::max(0.01f, dpiX / 96.0f);
+            const float dipToPxY = std::max(0.01f, dpiY / 96.0f);
+
+            outRect->left = static_cast<LONG>(std::floor(minDipX * dipToPxX) - 1.0f);
+            outRect->top = static_cast<LONG>(std::floor(minDipY * dipToPxY) - 1.0f);
+            outRect->right = static_cast<LONG>(std::ceil(maxDipX * dipToPxX) + 1.0f);
+            outRect->bottom = static_cast<LONG>(std::ceil(maxDipY * dipToPxY) + 1.0f);
+            return outRect->right > outRect->left && outRect->bottom > outRect->top;
+        }
+
+        bool EstimateBackgroundLumaFromHwnd(HWND hwnd, RECT sampleRectPx, float* outLuma)
+        {
+            if (!hwnd || !outLuma) return false;
+
+            RECT clientRect = {};
+            if (!GetClientRect(hwnd, &clientRect))
+            {
+                return false;
+            }
+
+            RECT clampedRect = {};
+            if (!IntersectRect(&clampedRect, &sampleRectPx, &clientRect))
+            {
+                return false;
+            }
+
+            const int width = clampedRect.right - clampedRect.left;
+            const int height = clampedRect.bottom - clampedRect.top;
+            if (width <= 0 || height <= 0)
+            {
+                return false;
+            }
+
+            HDC dc = GetDC(hwnd);
+            if (!dc)
+            {
+                return false;
+            }
+
+            // Sparse grid sampling keeps overhead small while giving a robust luma estimate.
+            constexpr int kSampleCols = 6;
+            constexpr int kSampleRows = 4;
+            float sumLuma = 0.0f;
+            int validSamples = 0;
+
+            for (int row = 0; row < kSampleRows; ++row)
+            {
+                const int y = clampedRect.top +
+                    static_cast<int>(((row + 0.5f) * static_cast<float>(height)) / kSampleRows);
+                for (int col = 0; col < kSampleCols; ++col)
+                {
+                    const int x = clampedRect.left +
+                        static_cast<int>(((col + 0.5f) * static_cast<float>(width)) / kSampleCols);
+                    const COLORREF srgb = GetPixel(dc, x, y);
+                    if (srgb == CLR_INVALID)
+                    {
+                        continue;
+                    }
+
+                    const float r = sRGBToLinear(GetRValue(srgb));
+                    const float g = sRGBToLinear(GetGValue(srgb));
+                    const float b = sRGBToLinear(GetBValue(srgb));
+                    sumLuma += 0.2126f * r + 0.7152f * g + 0.0722f * b;
+                    ++validSamples;
+                }
+            }
+
+            ReleaseDC(hwnd, dc);
+
+            if (validSamples < 4)
+            {
+                return false;
+            }
+
+            *outLuma = std::clamp(sumLuma / static_cast<float>(validSamples), 0.0f, 1.0f);
+            return true;
         }
 
         std::string WideToUtf8(std::wstring const& value)
@@ -352,14 +531,6 @@ namespace puretype::hooks
                 // RAII reference count — prevents rasterizer shutdown while rendering
                 DWriteHookRefGuard refGuard;
 
-                const auto& cfg = Config::Instance().Data();
-                if (cfg.filterStrength <= 0.0f)
-                {
-                    return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
-                                               measuringMode, glyphRun, glyphRunDescription,
-                                               clientDrawingEffect);
-                }
-
                 ID2D1RenderTarget* renderTarget = TryGetD2DRenderTarget(clientDrawingContext);
                 if (!renderTarget)
                 {
@@ -374,6 +545,40 @@ namespace puretype::hooks
                     ID2D1RenderTarget* rt;
                     ~RenderTargetReleaser() { if (rt) rt->Release(); }
                 } rtReleaser{renderTarget};
+
+                std::string monitorName = "";
+                HWND targetHwnd = nullptr;
+                ID2D1HwndRenderTarget* hwndRT = nullptr;
+                if (SUCCEEDED(
+                        renderTarget->QueryInterface(__uuidof(ID2D1HwndRenderTarget),
+                                                     reinterpret_cast<void**>(&hwndRT))) &&
+                    hwndRT)
+                {
+                    if (HWND hwnd = hwndRT->GetHwnd())
+                    {
+                        targetHwnd = hwnd;
+                        if (HMONITOR hmon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST))
+                        {
+                            MONITORINFOEXA mi;
+                            mi.cbSize = sizeof(mi);
+                            if (GetMonitorInfoA(hmon, &mi))
+                            {
+                                monitorName = mi.szDevice;
+                            }
+                        }
+                    }
+                    hwndRT->Release();
+                }
+
+                const auto& cfg = Config::Instance().GetData(monitorName);
+                if (cfg.filterStrength <= 0.0f)
+                {
+                    return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
+                                               measuringMode, glyphRun, glyphRunDescription,
+                                               clientDrawingEffect);
+                }
+                ConfigData renderCfg = cfg;
+                initColorMathLUTs(renderCfg.gammaMode == GammaMode::OLED);
 
                 std::string fontPath = GetFontPathFromFace(glyphRun->fontFace);
                 if (fontPath.empty())
@@ -409,10 +614,35 @@ namespace puretype::hooks
                 // rasterization and division-by-zero in downstream positioning math.
                 pixelsPerDip = std::max(0.25f, pixelsPerDip);
 
+                // DPI-aware fade-out: match GDI policy to reduce chroma/fringing at high DPI.
+                const float effectiveDpi = pixelsPerDip * 96.0f;
+                float dpiScaleHint = 1.0f;
+                if (effectiveDpi >= renderCfg.highDpiThresholdHigh)
+                {
+                    return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
+                                               measuringMode, glyphRun, glyphRunDescription,
+                                               clientDrawingEffect);
+                }
+                if (effectiveDpi > renderCfg.highDpiThresholdLow)
+                {
+                    dpiScaleHint = 1.0f - std::clamp(
+                        (effectiveDpi - renderCfg.highDpiThresholdLow) /
+                        (renderCfg.highDpiThresholdHigh - renderCfg.highDpiThresholdLow),
+                        0.0f, 1.0f);
+                    renderCfg.filterStrength *= dpiScaleHint;
+                    if (renderCfg.filterStrength <= 0.0f)
+                    {
+                        return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
+                                                   measuringMode, glyphRun, glyphRunDescription,
+                                                   clientDrawingEffect);
+                    }
+                }
+                renderCfg.dpiScaleHint = dpiScaleHint;
+
                 const auto emPixels = static_cast<float>(std::lround(glyphRun->fontEmSize * pixelsPerDip));
                 const uint32_t pixelSize = static_cast<uint32_t>(std::max(1.0f, emPixels));
 
-                const auto filter = SubpixelFilter::Create(static_cast<int>(cfg.panelType));
+                const auto filter = SubpixelFilter::Create(static_cast<int>(renderCfg.panelType));
                 if (!filter)
                 {
                     return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
@@ -421,6 +651,7 @@ namespace puretype::hooks
                 }
 
                 auto textColor = D2D1_COLOR_F{0.0f, 0.0f, 0.0f, 1.0f};
+                bool hasReliableTextColor = false;
                 if (clientDrawingEffect)
                 {
                     ID2D1SolidColorBrush* brush = nullptr;
@@ -429,8 +660,9 @@ namespace puretype::hooks
                         brush)
                     {
                         textColor = brush->GetColor();
+                        hasReliableTextColor = true;
                         brush->Release();
-                        if (cfg.debugEnabled)
+                        if (renderCfg.debugEnabled)
                         {
                             PureTypeLog("DWrite DrawGlyphRun: color from brush R=%.2f G=%.2f B=%.2f A=%.2f",
                                         textColor.r, textColor.g, textColor.b, textColor.a);
@@ -438,7 +670,7 @@ namespace puretype::hooks
                     }
                     else
                     {
-                        if (cfg.debugEnabled)
+                        if (renderCfg.debugEnabled)
                         {
                             PureTypeLog("DWrite DrawGlyphRun: clientDrawingEffect present but NOT a SolidColorBrush");
                         }
@@ -446,17 +678,80 @@ namespace puretype::hooks
                 }
                 else
                 {
-                    if (cfg.debugEnabled)
+                    if (renderCfg.debugEnabled)
                     {
-                        PureTypeLog("DWrite DrawGlyphRun: clientDrawingEffect is NULL — defaulting to black");
+                        PureTypeLog("DWrite DrawGlyphRun: clientDrawingEffect is NULL");
                     }
                 }
-                if (cfg.debugEnabled)
+                if (!hasReliableTextColor)
+                {
+                    // Without a reliable color source, avoid rendering with a wrong tint.
+                    return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
+                                               measuringMode, glyphRun, glyphRunDescription,
+                                               clientDrawingEffect);
+                }
+
+                // Contrast hint used by ToneMapper in the DWrite path.
+                // Prefer real background sampling from HWND render targets, and
+                // fall back to the text-luma proxy when sampling is unavailable.
+                const uint8_t textR8 = static_cast<uint8_t>(std::clamp(textColor.r, 0.0f, 1.0f) * 255.0f + 0.5f);
+                const uint8_t textG8 = static_cast<uint8_t>(std::clamp(textColor.g, 0.0f, 1.0f) * 255.0f + 0.5f);
+                const uint8_t textB8 = static_cast<uint8_t>(std::clamp(textColor.b, 0.0f, 1.0f) * 255.0f + 0.5f);
+                const float linTextR = sRGBToLinear(textR8);
+                const float linTextG = sRGBToLinear(textG8);
+                const float linTextB = sRGBToLinear(textB8);
+                const float linTextLuma = 0.2126f * linTextR + 0.7152f * linTextG + 0.0722f * linTextB;
+                const float textAlpha = std::clamp(textColor.a, 0.0f, 1.0f);
+
+                float contrastHint = std::max(linTextLuma, 1.0f - linTextLuma);
+                float sampledBgLuma = 0.0f;
+                bool usedMeasuredContrast = false;
+                if (targetHwnd)
+                {
+                    RECT sampleRectPx = {};
+                    if (ComputeGlyphRunSampleRectPx(*glyphRun, baselineOriginX, baselineOriginY,
+                                                    rtTransform, rtDpiX, rtDpiY, &sampleRectPx) &&
+                        EstimateBackgroundLumaFromHwnd(targetHwnd, sampleRectPx, &sampledBgLuma))
+                    {
+                        contrastHint = std::abs(linTextLuma - sampledBgLuma);
+                        usedMeasuredContrast = true;
+                    }
+                }
+
+                renderCfg.textContrastHint = std::clamp(contrastHint * textAlpha, 0.0f, 1.0f);
+
+                if (renderCfg.debugEnabled)
                 {
                     PureTypeLog("  font='%s' emSize=%.1f pixelsPerDip=%.2f pixelSize=%u glyphCount=%u",
                                 fontPath.c_str(), glyphRun->fontEmSize, pixelsPerDip, pixelSize,
                                 glyphRun->glyphCount);
+                    PureTypeLog("  contrastHint=%.3f source=%s textLuma=%.3f bgLuma=%.3f",
+                                renderCfg.textContrastHint,
+                                usedMeasuredContrast ? "measured" : "proxy",
+                                linTextLuma,
+                                usedMeasuredContrast ? sampledBgLuma : -1.0f);
                 }
+
+                uint16_t fontWeight = 400;
+                IDWriteFontFace3* fontFace3 = nullptr;
+                if (SUCCEEDED(glyphRun->fontFace->QueryInterface(__uuidof(IDWriteFontFace3),
+                                                                 reinterpret_cast<void**>(&fontFace3))) &&
+                    fontFace3)
+                {
+                    fontWeight = static_cast<uint16_t>(std::clamp(
+                        static_cast<int>(fontFace3->GetWeight()), 100, 900));
+                    fontFace3->Release();
+                }
+
+                auto computePhase = [](FLOAT logicalCoord, FLOAT ppd) -> uint8_t
+                {
+                    const float pixelCoord = logicalCoord * ppd;
+                    const float frac = pixelCoord - std::floor(pixelCoord);
+                    int phase = static_cast<int>(std::floor(frac * 3.0f + 0.5f));
+                    phase %= 3;
+                    if (phase < 0) phase += 3;
+                    return static_cast<uint8_t>(phase);
+                };
 
                 struct PendingGlyph
                 {
@@ -470,8 +765,13 @@ namespace puretype::hooks
                 FLOAT penX = baselineOriginX;
                 for (UINT32 i = 0; i < glyphRun->glyphCount; ++i)
                 {
+                    const FLOAT offsetX = glyphRun->glyphOffsets ? glyphRun->glyphOffsets[i].advanceOffset : 0.0f;
+                    const FLOAT offsetY = glyphRun->glyphOffsets ? glyphRun->glyphOffsets[i].ascenderOffset : 0.0f;
+                    const uint8_t phaseX = computePhase(penX + offsetX, pixelsPerDip);
+                    const uint8_t phaseY = computePhase(baselineOriginY - offsetY, pixelsPerDip);
+
                     const GlyphBitmap* glyph = FTRasterizer::Instance().RasterizeGlyph(
-                        fontPath, glyphRun->glyphIndices[i], pixelSize);
+                        fontPath, glyphRun->glyphIndices[i], pixelSize, renderCfg, fontWeight, phaseX, phaseY);
                     if (!glyph)
                     {
                         return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
@@ -487,8 +787,8 @@ namespace puretype::hooks
 
                     if (glyphRun->glyphOffsets)
                     {
-                        glyphX += glyphRun->glyphOffsets[i].advanceOffset;
-                        glyphY -= glyphRun->glyphOffsets[i].ascenderOffset;
+                        glyphX += offsetX;
+                        glyphY -= offsetY;
                     }
 
                     const FLOAT advance = glyphRun->glyphAdvances
@@ -501,7 +801,7 @@ namespace puretype::hooks
                         continue;
                     }
 
-                    RGBABitmap filtered = filter->Apply(*glyph, cfg);
+                    RGBABitmap filtered = filter->Apply(*glyph, renderCfg);
                     if (filtered.data.empty())
                     {
                         return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
@@ -509,7 +809,7 @@ namespace puretype::hooks
                                                    clientDrawingEffect);
                     }
 
-                    if (cfg.highlightRenderedGlyphs)
+                    if (renderCfg.highlightRenderedGlyphs)
                     {
                         for (size_t p = 0; p + 3 < filtered.data.size(); p += 4)
                         {
@@ -533,7 +833,7 @@ namespace puretype::hooks
                 for (const auto& item : pending)
                 {
                     bool blitOk = Blender::Instance().BlitToD2DTarget(
-                        renderTarget, item.x, item.y, item.bitmap, textColor, cfg.gamma, pixelsPerDip);
+                        renderTarget, item.x, item.y, item.bitmap, textColor, renderCfg.gamma, pixelsPerDip);
                     if (!blitOk)
                     {
                         allGlyphsBlitted = false;

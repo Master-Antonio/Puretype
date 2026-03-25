@@ -1,9 +1,11 @@
 <Window x:Class="PuretypeUI.MainWindow"
         xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:primitives="clr-namespace:System.Windows.Controls.Primitives;assembly=PresentationFramework"
         Title="Puretype" Height="640" Width="1000"
         Background="Transparent" Foreground="White"
         WindowStyle="None" AllowsTransparency="True" ResizeMode="NoResize"
+        MinWidth="760" MinHeight="520"
         WindowStartupLocation="CenterScreen">
 
     <Window.Triggers>
@@ -148,25 +150,53 @@
                             <Border x:Name="bd" Background="{TemplateBinding Background}"
                                     BorderBrush="{TemplateBinding BorderBrush}"
                                     BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="6">
-                                <Grid Margin="{TemplateBinding Padding}">
+                                <Grid>
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*"/>
-                                        <ColumnDefinition Width="16"/>
+                                        <ColumnDefinition Width="28"/>
                                     </Grid.ColumnDefinitions>
-                                    <ContentPresenter Grid.Column="0" Content="{TemplateBinding SelectionBoxItem}"
-                                                      VerticalAlignment="Center" IsHitTestVisible="False"/>
-                                    <Path Grid.Column="1" Data="M0,0 L4,0 L2,3 Z"
-                                          Fill="#445566" VerticalAlignment="Center" HorizontalAlignment="Center"/>
+
+                                    <ContentPresenter x:Name="ContentSite"
+                                                      Grid.Column="0"
+                                                      Margin="{TemplateBinding Padding}"
+                                                      Content="{TemplateBinding SelectionBoxItem}"
+                                                      ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}"
+                                                      ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}"
+                                                      VerticalAlignment="Center"
+                                                      HorizontalAlignment="Left"
+                                                      IsHitTestVisible="False"/>
+
+                                    <TextBox x:Name="PART_EditableTextBox"
+                                             Grid.Column="0"
+                                             Margin="{TemplateBinding Padding}"
+                                             Background="Transparent"
+                                             BorderThickness="0"
+                                             Foreground="{TemplateBinding Foreground}"
+                                             CaretBrush="#00D8FF"
+                                             FontFamily="{TemplateBinding FontFamily}"
+                                             FontSize="{TemplateBinding FontSize}"
+                                             VerticalContentAlignment="Center"
+                                             HorizontalContentAlignment="Left"
+                                             Visibility="Hidden"/>
+
+                                    <ToggleButton x:Name="DropDownToggle"
+                                                  Grid.Column="1"
+                                                  Focusable="False"
+                                                  OverridesDefaultStyle="True"
+                                                  IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
+                                        <ToggleButton.Template>
+                                            <ControlTemplate TargetType="ToggleButton">
+                                                <Border Background="Transparent">
+                                                    <Path Data="M0,0 L6,0 L3,4 Z"
+                                                          Fill="#445566"
+                                                          VerticalAlignment="Center"
+                                                          HorizontalAlignment="Center"/>
+                                                </Border>
+                                            </ControlTemplate>
+                                        </ToggleButton.Template>
+                                    </ToggleButton>
                                 </Grid>
                             </Border>
-                            <ToggleButton Focusable="False" OverridesDefaultStyle="True"
-                                          IsChecked="{Binding IsDropDownOpen, Mode=TwoWay, RelativeSource={RelativeSource TemplatedParent}}">
-                                <ToggleButton.Template>
-                                    <ControlTemplate TargetType="ToggleButton">
-                                        <Border Background="Transparent"/>
-                                    </ControlTemplate>
-                                </ToggleButton.Template>
-                            </ToggleButton>
                             <Popup x:Name="PART_Popup" AllowsTransparency="True" Focusable="False"
                                    IsOpen="{Binding IsDropDownOpen, RelativeSource={RelativeSource TemplatedParent}}"
                                    Placement="Bottom" PopupAnimation="Slide">
@@ -188,6 +218,11 @@
                             </Trigger>
                             <Trigger Property="IsDropDownOpen" Value="True">
                                 <Setter TargetName="bd" Property="BorderBrush" Value="#00D8FF"/>
+                            </Trigger>
+                            <Trigger Property="IsEditable" Value="True">
+                                <Setter TargetName="ContentSite" Property="Visibility" Value="Hidden"/>
+                                <Setter TargetName="PART_EditableTextBox" Property="Visibility" Value="Visible"/>
+                                <Setter Property="Cursor" Value="IBeam"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -225,6 +260,40 @@
                             </Trigger>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="box" Property="BorderBrush" Value="#008AA0"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Tab Button Style -->
+        <Style x:Key="TabBtn" TargetType="RadioButton">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#5C5C84"/>
+            <Setter Property="BorderThickness" Value="0,0,0,2"/>
+            <Setter Property="BorderBrush" Value="Transparent"/>
+            <Setter Property="Padding" Value="12,8"/>
+            <Setter Property="FontFamily" Value="Segoe UI Variable Display, Segoe UI"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}"
+                                BorderBrush="{TemplateBinding BorderBrush}"
+                                BorderThickness="{TemplateBinding BorderThickness}"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Foreground" Value="#00D8FF"/>
+                            </Trigger>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter Property="Foreground" Value="#00D8FF"/>
+                                <Setter TargetName="bd" Property="BorderBrush" Value="#00D8FF"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
@@ -324,13 +393,34 @@
             </Setter>
         </Style>
 
-        <!-- Close button -->
-        <Style x:Key="CloseBtn" TargetType="Button">
+        <!-- Generic window button -->
+        <Style x:Key="WindowBtn" TargetType="Button">
             <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#A8B0CC"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Width" Value="28"/>
             <Setter Property="Height" Value="28"/>
             <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="bd" Background="{TemplateBinding Background}" CornerRadius="6">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="bd" Property="Background" Value="#0A1E2E"/>
+                                <Setter Property="Foreground" Value="#00D8FF"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Close button -->
+        <Style x:Key="CloseBtn" TargetType="Button" BasedOn="{StaticResource WindowBtn}">
+            <Setter Property="Foreground" Value="#C38FA0"/>
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
@@ -348,8 +438,22 @@
             </Setter>
         </Style>
 
+        <!-- Invisible resize grip (no visual border) -->
+        <Style x:Key="ResizeThumb" TargetType="{x:Type primitives:Thumb}">
+            <Setter Property="OverridesDefaultStyle" Value="True"/>
+            <Setter Property="Focusable" Value="False"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type primitives:Thumb}">
+                        <Border Background="Transparent"/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
     </Window.Resources>
 
+    <Grid>
     <Border CornerRadius="13" BorderThickness="1"
             MouseLeftButtonDown="Window_MouseLeftButtonDown">
         <Border.BorderBrush>
@@ -433,10 +537,20 @@
                                        FontSize="11" Foreground="#00D8FF" FontWeight="Bold"/>
                         </Border>
                     </StackPanel>
-                    <Button Grid.Column="1" Style="{StaticResource CloseBtn}" Click="Exit_Click" VerticalAlignment="Center">
-                        <TextBlock Text="✕" FontSize="11"
-                                   Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
-                    </Button>
+                    <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                        <Button Style="{StaticResource WindowBtn}" Click="Minimize_Click" Margin="0,0,4,0">
+                            <TextBlock Text="-" FontSize="14" FontWeight="Bold"
+                                       Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                        </Button>
+                        <Button Style="{StaticResource WindowBtn}" Click="ToggleMaximize_Click" Margin="0,0,4,0">
+                            <TextBlock x:Name="MaxRestoreGlyph" Text="[]" FontSize="11"
+                                       Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                        </Button>
+                        <Button Style="{StaticResource CloseBtn}" Click="Exit_Click">
+                            <TextBlock Text="X" FontSize="11"
+                                       Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                        </Button>
+                    </StackPanel>
                 </Grid>
 
                 <!-- HEADER DIVIDER -->
@@ -460,12 +574,53 @@
 
                     <!-- LEFT: scrollable settings -->
                     <Grid Grid.Column="0">
-                    <ScrollViewer x:Name="SettingsScroll"
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto"/>
+                            <RowDefinition Height="*"/>
+                        </Grid.RowDefinitions>
+
+                        <!-- Context Switcher -->
+                        <Border Grid.Row="0" Margin="0,0,10,18" Background="#0A0A18" BorderBrush="#16162A" BorderThickness="1" CornerRadius="8" Padding="16,10">
+                            <StackPanel>
+                                <StackPanel Orientation="Horizontal" HorizontalAlignment="Stretch">
+                                    <RadioButton x:Name="TabGlobal" Content="Global Defaults" Style="{StaticResource TabBtn}" IsChecked="True" Checked="Tab_Checked"/>
+                                    <RadioButton x:Name="TabDisplays" Content="Displays" Style="{StaticResource TabBtn}" Checked="Tab_Checked" Margin="10,0,0,0"/>
+                                    <RadioButton x:Name="TabApps" Content="App Profiles" Style="{StaticResource TabBtn}" Checked="Tab_Checked" Margin="10,0,0,0"/>
+                                </StackPanel>
+                                
+                                <!-- Displays UI -->
+                                <StackPanel x:Name="DisplaysPanel" Visibility="Collapsed" Margin="0,12,0,0">
+                                    <TextBlock Text="Select display logic:" FontFamily="Segoe UI Variable Display, Segoe UI" FontSize="13" Foreground="#9098BC" Margin="0,0,0,6"/>
+                                    <ComboBox x:Name="DisplaysCombo" Style="{StaticResource CB}" SelectionChanged="ContextCombo_SelectionChanged"/>
+                                </StackPanel>
+                                
+                                <!-- Apps UI -->
+                                <StackPanel x:Name="AppsPanel" Visibility="Collapsed" Margin="0,12,0,0">
+                                    <TextBlock Text="Select executable (e.g. code.exe):" FontFamily="Segoe UI Variable Display, Segoe UI" FontSize="13" Foreground="#9098BC" Margin="0,0,0,6"/>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <!-- Note: standard WPF ComboBox allows edits. IsEditable=True is standard. -->
+                                        <ComboBox x:Name="AppsCombo" Grid.Column="0" Style="{StaticResource CB}" IsEditable="True" TextBoxBase.TextChanged="AppsCombo_TextChanged" SelectionChanged="ContextCombo_SelectionChanged"/>
+                                        <Button x:Name="AddAppBtn" Grid.Column="1" Content="Add" Style="{StaticResource GhostBtn}" Padding="10,0" Margin="8,0,0,0" Click="AddAppBtn_Click" ToolTip="Save App Profile"/>
+                                        <Button x:Name="RemoveAppBtn" Grid.Column="2" Content="✕" Style="{StaticResource GhostBtn}" Padding="10,0" Margin="4,0,0,0" Click="RemoveAppBtn_Click" ToolTip="Remove App Profile"/>
+                                    </Grid>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+
+                    <ScrollViewer Grid.Row="1" x:Name="SettingsScroll"
                                   VerticalScrollBarVisibility="Hidden"
                                   HorizontalScrollBarVisibility="Disabled"
                                   PreviewMouseWheel="ScrollViewer_MouseWheel"
                                   ScrollChanged="SettingsScroll_ScrollChanged">
                         <StackPanel Margin="0,0,10,0">
+                            
+                            <!-- Context Label Header -->
+                            <TextBlock x:Name="ContextTitleText" Text="EDITING GLOBAL DEFAULTS" FontFamily="Consolas, Courier New" FontSize="11" FontWeight="Bold" Foreground="#00D8FF" Margin="0,0,0,18"/>
 
                             <!-- ── RENDERING ── -->
                             <StackPanel Margin="0,0,0,18">
@@ -477,19 +632,29 @@
                                     <StackPanel>
                                         <!-- Panel type -->
                                         <Grid>
-                                            <Grid.ColumnDefinitions>
-                                                <ColumnDefinition Width="*"/>
-                                                <ColumnDefinition Width="Auto"/>
-                                            </Grid.ColumnDefinitions>
+                                            <Grid.RowDefinitions>
+                                                <RowDefinition Height="Auto"/>
+                                                <RowDefinition Height="Auto"/>
+                                            </Grid.RowDefinitions>
                                             <TextBlock Text="Display panel type" FontFamily="Segoe UI Variable Display, Segoe UI"
                                                        FontSize="13" Foreground="#9098BC" VerticalAlignment="Center"/>
-                                            <Button Grid.Column="1" Style="{StaticResource GhostBtn}" Padding="8,2"
-                                                    Click="ApplyRecommended_Click" ToolTip="Apply the best settings for this specific panel">
-                                                <StackPanel Orientation="Horizontal">
-                                                    <TextBlock Text="✦" Foreground="#00D8FF" FontSize="14" Margin="0,0,4,0"/>
-                                                    <TextBlock Text="Apply recommended" FontSize="11" VerticalAlignment="Center"/>
-                                                </StackPanel>
-                                            </Button>
+                                            <WrapPanel Grid.Row="1" Margin="0,8,0,0">
+                                                <Button Style="{StaticResource GhostBtn}" Padding="10,3" Margin="0,0,6,0"
+                                                        Click="ApplyPreset_Click" Tag="balanced"
+                                                        ToolTip="Balanced profile (recommended default)">
+                                                    <TextBlock Text="Bilanciato" FontSize="11"/>
+                                                </Button>
+                                                <Button Style="{StaticResource GhostBtn}" Padding="10,3" Margin="0,0,6,0"
+                                                        Click="ApplyPreset_Click" Tag="sharp"
+                                                        ToolTip="Sharper text, more edge contrast, higher fringing risk">
+                                                    <TextBlock Text="Nitido" FontSize="11"/>
+                                                </Button>
+                                                <Button Style="{StaticResource GhostBtn}" Padding="10,3"
+                                                        Click="ApplyPreset_Click" Tag="clean"
+                                                        ToolTip="Cleaner chroma profile, lower fringing, softer look">
+                                                    <TextBlock Text="Pulito" FontSize="11"/>
+                                                </Button>
+                                            </WrapPanel>
                                         </Grid>
                                         <ComboBox x:Name="PanelTypeCombo" Style="{StaticResource CB}" Margin="0,6,0,0"
                                                   SelectionChanged="Setting_Changed_Combo">
@@ -867,15 +1032,22 @@
                                 <TextBlock Text="LIVE PREVIEW" FontFamily="Consolas, Courier New"
                                            FontSize="11" FontWeight="Bold" Foreground="#7A82B0" VerticalAlignment="Center"/>
                             </StackPanel>
-                            <ComboBox x:Name="PreviewSizeCombo" Grid.Column="1" Style="{StaticResource CB}"
-                                      Width="80" SelectionChanged="PreviewSize_Changed">
-                                <ComboBoxItem Content="12 px" Tag="12"/>
-                                <ComboBoxItem Content="16 px" Tag="16"/>
-                                <ComboBoxItem Content="24 px" Tag="24"/>
-                                <ComboBoxItem Content="32 px" Tag="32" IsSelected="True"/>
-                                <ComboBoxItem Content="48 px" Tag="48"/>
-                                <ComboBoxItem Content="64 px" Tag="64"/>
-                            </ComboBox>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                <ComboBox x:Name="PreviewContrastCombo" Style="{StaticResource CB}"
+                                          Width="100" SelectionChanged="PreviewContrast_Changed">
+                                    <ComboBoxItem Content="REAL BG" Tag="real" IsSelected="True"/>
+                                    <ComboBoxItem Content="PROXY" Tag="proxy"/>
+                                </ComboBox>
+                                <ComboBox x:Name="PreviewSizeCombo" Style="{StaticResource CB}"
+                                          Width="80" Margin="8,0,0,0" SelectionChanged="PreviewSize_Changed">
+                                    <ComboBoxItem Content="12 px" Tag="12"/>
+                                    <ComboBoxItem Content="16 px" Tag="16"/>
+                                    <ComboBoxItem Content="24 px" Tag="24"/>
+                                    <ComboBoxItem Content="32 px" Tag="32" IsSelected="True"/>
+                                    <ComboBoxItem Content="48 px" Tag="48"/>
+                                    <ComboBoxItem Content="64 px" Tag="64"/>
+                                </ComboBox>
+                            </StackPanel>
                         </Grid>
 
                         <Border Grid.Row="2" CornerRadius="10" BorderBrush="#14142A" BorderThickness="1" ClipToBounds="True">
@@ -983,4 +1155,32 @@
             </Grid>
         </Grid>
     </Border>
+
+    <!-- Resize grips (custom chrome with AllowsTransparency=True) -->
+    <primitives:Thumb Style="{StaticResource ResizeThumb}" Width="6" Cursor="SizeWE"
+                      HorizontalAlignment="Left" VerticalAlignment="Stretch"
+                      DragDelta="ResizeThumb_DragDelta" Tag="1"/>
+    <primitives:Thumb Style="{StaticResource ResizeThumb}" Width="6" Cursor="SizeWE"
+                      HorizontalAlignment="Right" VerticalAlignment="Stretch"
+                      DragDelta="ResizeThumb_DragDelta" Tag="2"/>
+    <primitives:Thumb Style="{StaticResource ResizeThumb}" Height="6" Cursor="SizeNS"
+                      HorizontalAlignment="Stretch" VerticalAlignment="Top"
+                      DragDelta="ResizeThumb_DragDelta" Tag="3"/>
+    <primitives:Thumb Style="{StaticResource ResizeThumb}" Height="6" Cursor="SizeNS"
+                      HorizontalAlignment="Stretch" VerticalAlignment="Bottom"
+                      DragDelta="ResizeThumb_DragDelta" Tag="6"/>
+
+    <primitives:Thumb Style="{StaticResource ResizeThumb}" Width="10" Height="10" Cursor="SizeNWSE"
+                      HorizontalAlignment="Left" VerticalAlignment="Top"
+                      DragDelta="ResizeThumb_DragDelta" Tag="4"/>
+    <primitives:Thumb Style="{StaticResource ResizeThumb}" Width="10" Height="10" Cursor="SizeNESW"
+                      HorizontalAlignment="Right" VerticalAlignment="Top"
+                      DragDelta="ResizeThumb_DragDelta" Tag="5"/>
+    <primitives:Thumb Style="{StaticResource ResizeThumb}" Width="10" Height="10" Cursor="SizeNESW"
+                      HorizontalAlignment="Left" VerticalAlignment="Bottom"
+                      DragDelta="ResizeThumb_DragDelta" Tag="7"/>
+    <primitives:Thumb Style="{StaticResource ResizeThumb}" Width="10" Height="10" Cursor="SizeNWSE"
+                      HorizontalAlignment="Right" VerticalAlignment="Bottom"
+                      DragDelta="ResizeThumb_DragDelta" Tag="8"/>
+    </Grid>
 </Window>

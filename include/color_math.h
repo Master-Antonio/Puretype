@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cmath>
 #include <algorithm>
+#include <mutex>
 
 namespace puretype
 {
@@ -19,10 +20,12 @@ namespace puretype
     inline float g_OLEDToLinearLUT[256] = {};
     inline uint8_t g_linearToOLEDLUT[4097] = {};
 
-    // Active LUT pointers — set by initColorMathLUTs() based on GammaMode.
+    // Active LUT pointers are thread-local so monitor/app-specific gamma mode
+    // changes in one render thread do not affect other threads.
     // All code should use sRGBToLinear() / linearToSRGB() which read from these.
-    inline float* g_activeToLinearLUT = g_sRGBToLinearLUT;
-    inline uint8_t* g_activeToGammaLUT = g_linearToSRGBLUT;
+    inline thread_local float* g_activeToLinearLUT = g_sRGBToLinearLUT;
+    inline thread_local uint8_t* g_activeToGammaLUT = g_linearToSRGBLUT;
+    inline std::once_flag g_colorMathLutInitOnce;
 
     inline float sRGBToLinearExact(float s)
     {
@@ -82,39 +85,8 @@ namespace puretype
         return g_activeToGammaLUT[idx];
     }
 
-    inline void initColorMathLUTs(bool useOLEDGamma = false)
+    inline void setColorMathGammaMode(bool useOLEDGamma)
     {
-        // Always build sRGB LUTs
-        for (int i = 0; i < 256; ++i)
-        {
-            float s = static_cast<float>(i) / 255.0f;
-            g_sRGBToLinearLUT[i] = sRGBToLinearExact(s);
-        }
-
-        for (int i = 0; i <= 4096; ++i)
-        {
-            float linear = static_cast<float>(i) / 4096.0f;
-            float srgb = linearToSRGBExact(linear);
-            g_linearToSRGBLUT[i] = static_cast<uint8_t>(
-                std::clamp(srgb * 255.0f + 0.5f, 0.0f, 255.0f));
-        }
-
-        // Build OLED LUTs
-        for (int i = 0; i < 256; ++i)
-        {
-            float s = static_cast<float>(i) / 255.0f;
-            g_OLEDToLinearLUT[i] = OLEDToLinearExact(s);
-        }
-
-        for (int i = 0; i <= 4096; ++i)
-        {
-            float linear = static_cast<float>(i) / 4096.0f;
-            float oled = linearToOLEDExact(linear);
-            g_linearToOLEDLUT[i] = static_cast<uint8_t>(
-                std::clamp(oled * 255.0f + 0.5f, 0.0f, 255.0f));
-        }
-
-        // Set active pointers
         if (useOLEDGamma)
         {
             g_activeToLinearLUT = g_OLEDToLinearLUT;
@@ -125,5 +97,43 @@ namespace puretype
             g_activeToLinearLUT = g_sRGBToLinearLUT;
             g_activeToGammaLUT = g_linearToSRGBLUT;
         }
+    }
+
+    inline void initColorMathLUTs(bool useOLEDGamma = false)
+    {
+        std::call_once(g_colorMathLutInitOnce, []()
+        {
+            // Always build sRGB LUTs.
+            for (int i = 0; i < 256; ++i)
+            {
+                float s = static_cast<float>(i) / 255.0f;
+                g_sRGBToLinearLUT[i] = sRGBToLinearExact(s);
+            }
+
+            for (int i = 0; i <= 4096; ++i)
+            {
+                float linear = static_cast<float>(i) / 4096.0f;
+                float srgb = linearToSRGBExact(linear);
+                g_linearToSRGBLUT[i] = static_cast<uint8_t>(
+                    std::clamp(srgb * 255.0f + 0.5f, 0.0f, 255.0f));
+            }
+
+            // Build OLED LUTs.
+            for (int i = 0; i < 256; ++i)
+            {
+                float s = static_cast<float>(i) / 255.0f;
+                g_OLEDToLinearLUT[i] = OLEDToLinearExact(s);
+            }
+
+            for (int i = 0; i <= 4096; ++i)
+            {
+                float linear = static_cast<float>(i) / 4096.0f;
+                float oled = linearToOLEDExact(linear);
+                g_linearToOLEDLUT[i] = static_cast<uint8_t>(
+                    std::clamp(oled * 255.0f + 0.5f, 0.0f, 255.0f));
+            }
+        });
+
+        setColorMathGammaMode(useOLEDGamma);
     }
 }
