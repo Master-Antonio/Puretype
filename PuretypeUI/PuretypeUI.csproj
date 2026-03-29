@@ -17,6 +17,7 @@
     <None Update="puretype.ini">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <Resource Include="Assets\puretype_logo.png" />
   </ItemGroup>
 
 </Project>

@@ -29,11 +29,11 @@ namespace puretype
         float gamma = 1.0f;
         float oledGammaOutput = 1.0f;
         bool enableSubpixelHinting = true;
-        bool enableFractionalPositioning = true;
+        bool enableFractionalPositioning = false;
         float lodThresholdSmall = 12.0f;
         float lodThresholdLarge = 24.0f;
         float woledCrossTalkReduction = 0.0f;
-        float lumaContrastStrength = 2.0f;
+        float lumaContrastStrength = 1.20f;
         // Optional runtime hints used by ToneMapper for adaptive chroma behavior.
         // textContrastHint: [0..1], <0 disables the hint.
         float textContrastHint = -1.0f;
@@ -41,12 +41,17 @@ namespace puretype
         float dpiScaleHint = 1.0f;
 
         bool stemDarkeningEnabled = true;
-        float stemDarkeningStrength = 0.35f;
+        float stemDarkeningStrength = 0.45f;
+
+        // Inter variable font axis settings (global only, used by UI).
+        int interFontWeight = 400;
+        float interOpticalSize = 18.0f;
+        float interLetterSpacing = 0.3f;
 
         // DPI-aware fade-out thresholds.
         // Between dpiLow and dpiHigh, filterStrength and chromaKeep ramp down.
         // Above dpiHigh the filter is skipped entirely (GDI passthrough).
-        float highDpiThresholdLow  = 144.0f;
+        float highDpiThresholdLow = 144.0f;
         float highDpiThresholdHigh = 216.0f;
 
         bool debugEnabled = false;
@@ -77,7 +82,7 @@ namespace puretype
         std::unordered_map<std::string, std::string> m_values;
 
         void ParseLine(const std::string& line, std::string& currentSection);
-        
+
         // Context-aware value fetcher (Process > Monitor > General)
         std::string GetValue(const std::string& key, const std::string& defaultVal,
                              const std::string& monitorName = "") const;

@@ -13,6 +13,22 @@
 
 namespace puretype
 {
+    // Optional variable-font axis overrides passed from hooks to the rasterizer.
+    // Non-zero values cause FT_Set_Var_Design_Coordinates to be called before
+    // loading the glyph.  Used to apply Inter font axis settings from the INI.
+    struct VariableAxisOverrides
+    {
+        int weight = 0; // wght axis (0 = no override)
+        float opticalSize = 0.f; // opsz axis (0 = no override)
+
+        [[nodiscard]] bool HasOverrides() const { return weight != 0 || opticalSize != 0.f; }
+
+        bool operator==(const VariableAxisOverrides& o) const
+        {
+            return weight == o.weight && opticalSize == o.opticalSize;
+        }
+    };
+
     struct GlyphBitmap
     {
         uint64_t fontHash = 0;
@@ -49,6 +65,7 @@ namespace puretype
         uint8_t phaseY;
         uint8_t panelType;
         bool subpixelHinting;
+        VariableAxisOverrides axisOverrides;
 
         bool operator==(const GlyphCacheKey& o) const
         {
@@ -59,7 +76,8 @@ namespace puretype
                 phaseX == o.phaseX &&
                 phaseY == o.phaseY &&
                 panelType == o.panelType &&
-                subpixelHinting == o.subpixelHinting;
+                subpixelHinting == o.subpixelHinting &&
+                axisOverrides == o.axisOverrides;
         }
     };
 
@@ -75,6 +93,8 @@ namespace puretype
             h ^= std::hash<uint8_t>{}(k.phaseY) + 0x9e3779b9 + (h << 6) + (h >> 2);
             h ^= std::hash<uint8_t>{}(k.panelType) + 0x9e3779b9 + (h << 6) + (h >> 2);
             h ^= std::hash<bool>{}(k.subpixelHinting) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            h ^= std::hash<int>{}(k.axisOverrides.weight) + 0x9e3779b9 + (h << 6) + (h >> 2);
+            h ^= std::hash<float>{}(k.axisOverrides.opticalSize) + 0x9e3779b9 + (h << 6) + (h >> 2);
             return h;
         }
     };
@@ -123,7 +143,8 @@ namespace puretype
                                           const ConfigData& cfg,
                                           uint16_t fontWeight = 400,
                                           uint8_t phaseX = 0,
-                                          uint8_t phaseY = 0);
+                                          uint8_t phaseY = 0,
+                                          const VariableAxisOverrides& axisOverrides = {});
 
         struct PositionedGlyph
         {
@@ -141,7 +162,8 @@ namespace puretype
             const int* lpDx = nullptr,
             uint16_t fontWeight = 400,
             const uint8_t* fractionalPhaseX = nullptr,
-            const uint8_t* fractionalPhaseY = nullptr);
+            const uint8_t* fractionalPhaseY = nullptr,
+            const VariableAxisOverrides& axisOverrides = {});
 
         static FTRasterizer& Instance();
 

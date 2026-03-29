@@ -229,6 +229,8 @@ namespace puretype
                                        ? computeDarkenAmount(emSize, cfg.stemDarkeningStrength, glyph.fontWeight)
                                        : 0.0f;
 
+        const float strength = std::clamp(cfg.filterStrength, 0.0f, 2.0f);
+
         // The original 7-tap filter (1+2+3+4+3+2+1 / 16) spans 7/4 = 1.75 physical
         // pixels for WOLED's 4-slot layout. This creates visible horizontal color
         // fringing on thin strokes because energy from one pixel bleeds into the
@@ -239,9 +241,6 @@ namespace puretype
         constexpr int FILTER_CENTER = 1; // offset for i - center
 
         // Pre-allocate the per-row coverage buffer outside the row loop.
-        // Previously allocated inside the loop, causing one heap allocation and
-        // deallocation per row (up to ~200 per glyph at 200px). Single allocation
-        // reused across all rows.
         std::vector<float> cov4X(pixelWidth * 4);
 
         for (int y = 0; y < height; ++y)
@@ -270,7 +269,9 @@ namespace puretype
                                                     0, pixelWidth * 4 - 1);
                         sum += cov4X[srcP] * FILTER_WEIGHTS[i];
                     }
-                    a[slot] = sum;
+                    // Blend raw (sharp) ↔ filtered (smooth) by filterStrength.
+                    const float raw = cov4X[p + slot];
+                    a[slot] = raw + (sum - raw) * std::min(strength, 1.0f);
                 }
 
                 float alpha_r, alpha_w, alpha_b, alpha_g;
@@ -357,10 +358,19 @@ namespace puretype
                                        ? computeDarkenAmount(emSize, cfg.stemDarkeningStrength, glyph.fontWeight)
                                        : 0.0f;
 
-        // 5-tap FIR, symmetric, weights sum to 1.0 (1+2+3+2+1 = 9).
-        constexpr float FILTER_WEIGHTS[5] = {
-            1.0f / 9.0f, 2.0f / 9.0f, 3.0f / 9.0f, 2.0f / 9.0f, 1.0f / 9.0f
-        };
+        // filterStrength modulates how aggressively the OLED correction is applied.
+        // At 1.0: full triangular correction (max color-fringe reduction).
+        // At 0.5: 50% correction blended with sharp unfiltered coverage.
+        // At 0.0: exits early in the hook (never reaches here).
+        const float strength = std::clamp(cfg.filterStrength, 0.0f, 2.0f);
+
+        // 3-tap FIR, symmetric — replaces the previous 5-tap which was too wide
+        // and caused visible loss of sharpness. The 3-tap spans ±1 subpixel
+        // (~1 physical pixel) which is sufficient for triangular geometry correction
+        // while preserving stem crispness.
+        constexpr float FILTER_WEIGHTS[3] = {0.25f, 0.50f, 0.25f};
+        constexpr int FILTER_TAPS = 3;
+        constexpr int FILTER_CENTER = 1;
 
         // Pre-allocate coverage buffer outside the row loop (same as WOLEDFilter).
         std::vector<float> cov3X(pixelWidth * 3);
@@ -377,23 +387,27 @@ namespace puretype
             //   Odd  row:   [. G . B . R . G . B .]  x offsets +1.5 subpx
             //
             // A pure horizontal sampling pass treats all rows as stripe-RGB,
-            // which is wrong for this geometry. The fix blends 25% of the
+            // which is wrong for this geometry. The fix blends a fraction of the
             // adjacent row, shifted by ±1.5 subpixels, into the current row's
             // coverage samples. This approximates how the triangular layout
             // shares coverage between physical rows.
             //
-            // Even rows look 25% down (adjacent row is +1.5 subpx to the right).
-            // Odd  rows look 25% up   (adjacent row is -1.5 subpx to the left).
+            // Even rows look down (adjacent row is +1.5 subpx to the right).
+            // Odd  rows look up   (adjacent row is -1.5 subpx to the left).
             const int yAdj = (y % 2 == 0)
                                  ? std::min(y + 1, height - 1) // even: look at row below
                                  : std::max(y - 1, 0); // odd:  look at row above
             const uint8_t* rowAdj = glyph.data.data() + yAdj * glyph.pitch;
 
             // Horizontal shift of the adjacent row in subpixel units.
-            // +1.5 for even rows (adjacent row is shifted right),
-            // -1.5 for odd  rows (adjacent row is shifted left).
             const float kAdjShift = (y % 2 == 0) ? +1.5f : -1.5f;
-            constexpr float kVertBlend = 0.25f; // 25% from adjacent row
+
+            // Vertical blend modulated by filterStrength.
+            // Reduced from the original 25% to 15% max — the old value caused
+            // visible vertical softening on small text. filterStrength further
+            // scales this so users can minimize blur at the cost of slight
+            // triangular geometry inaccuracy.
+            const float kVertBlend = 0.15f * std::min(strength, 1.0f);
 
             for (int px = 0; px < pixelWidth; ++px)
             {
@@ -405,7 +419,6 @@ namespace puretype
                     const float s0 = SampleContinuousX(row0, fxMain, glyph.width);
                     const float s1 = SampleContinuousX(rowAdj, fxAdj, glyph.width);
 
-                    // Blend: primary row contributes 75%, adjacent 25%.
                     cov3X[px * 3 + slot] = s0 * (1.0f - kVertBlend) + s1 * kVertBlend;
                 }
             }
@@ -417,12 +430,16 @@ namespace puretype
                 for (int slot = 0; slot < 3; ++slot)
                 {
                     float sum = 0.0f;
-                    for (int i = 0; i < 5; ++i)
+                    for (int i = 0; i < FILTER_TAPS; ++i)
                     {
-                        const int srcP = std::clamp(p + slot + i - 2, 0, pixelWidth * 3 - 1);
+                        const int srcP = std::clamp(p + slot + i - FILTER_CENTER,
+                                                    0, pixelWidth * 3 - 1);
                         sum += cov3X[srcP] * FILTER_WEIGHTS[i];
                     }
-                    filt[slot] = sum;
+                    // Blend between sharp (raw) and filtered coverage.
+                    // filterStrength=1.0 → full FIR; 0.5 → half raw + half FIR.
+                    const float raw = cov3X[p + slot];
+                    filt[slot] = raw + (sum - raw) * std::min(strength, 1.0f);
                 }
 
                 float final_r = Clamp01(filt[0]);

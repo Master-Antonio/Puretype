@@ -4,6 +4,7 @@
 #include <cstring>
 #include <algorithm>
 #include FT_LCD_FILTER_H
+#include FT_MULTIPLE_MASTERS_H
 
 extern void PureTypeLog(const char* fmt, ...);
 
@@ -221,7 +222,8 @@ namespace puretype
         const ConfigData& cfg,
         uint16_t fontWeight,
         uint8_t phaseX,
-        uint8_t phaseY)
+        uint8_t phaseY,
+        const VariableAxisOverrides& axisOverrides)
     {
         // Normalize phases to [0, kPhaseCount-1] = [0, 2].
         const uint8_t normPhaseX = NormalizePhase(phaseX);
@@ -232,7 +234,8 @@ namespace puretype
             normPhaseX,
             normPhaseY,
             static_cast<uint8_t>(cfg.panelType),
-            cfg.enableSubpixelHinting
+            cfg.enableSubpixelHinting,
+            axisOverrides
         };
 
         // 1. Thread-safe cache check — copy under lock to prevent use-after-free.
@@ -267,6 +270,39 @@ namespace puretype
 
             FT_Set_Pixel_Sizes(face, 0, pixelSize);
 
+            // Apply variable-font axis overrides (wght, opsz) when present.
+            // This is used for Inter font with user-specified axes from the INI.
+            if (axisOverrides.HasOverrides() && FT_HAS_MULTIPLE_MASTERS(face))
+            {
+                FT_MM_Var* mmVar = nullptr;
+                if (FT_Get_MM_Var(face, &mmVar) == 0 && mmVar)
+                {
+                    // Build design coordinates array — start with defaults.
+                    std::vector<FT_Fixed> coords(mmVar->num_axis);
+                    for (FT_UInt a = 0; a < mmVar->num_axis; ++a)
+                        coords[a] = mmVar->axis[a].def;
+
+                    // Map named axes to the correct index.
+                    for (FT_UInt a = 0; a < mmVar->num_axis; ++a)
+                    {
+                        const FT_ULong tag = mmVar->axis[a].tag;
+                        if (tag == FT_MAKE_TAG('w', 'g', 'h', 't') && axisOverrides.weight != 0)
+                        {
+                            coords[a] = static_cast<FT_Fixed>(axisOverrides.weight) << 16;
+                        }
+                        else if (tag == FT_MAKE_TAG('o', 'p', 's', 'z') && axisOverrides.opticalSize != 0.f)
+                        {
+                            coords[a] = static_cast<FT_Fixed>(axisOverrides.opticalSize * 65536.f);
+                        }
+                    }
+
+                    FT_Set_Var_Design_Coordinates(face, mmVar->num_axis, coords.data());
+                    FT_Done_MM_Var(m_ftLibrary, mmVar);
+
+                    // Re-set pixel sizes after axis change (some engines require it).
+                    FT_Set_Pixel_Sizes(face, 0, pixelSize);
+                }
+            }
 
             // FT_LOAD_TARGET_LCD optimises stem positions for HORIZONTAL RGB stripe
             // layout — it biases vertical stem edges toward the nearest horizontal
@@ -442,7 +478,8 @@ namespace puretype
         const int* lpDx,
         uint16_t fontWeight,
         const uint8_t* fractionalPhaseX,
-        const uint8_t* fractionalPhaseY)
+        const uint8_t* fractionalPhaseY,
+        const VariableAxisOverrides& axisOverrides)
     {
         std::vector<PositionedGlyph> result;
         result.reserve(glyphCount);
@@ -464,7 +501,7 @@ namespace puretype
                                        : 0;
 
             const GlyphBitmap* bmp = RasterizeGlyph(
-                fontPath, glyphIndices[i], pixelSize, cfg, fontWeight, phaseX, phaseY);
+                fontPath, glyphIndices[i], pixelSize, cfg, fontWeight, phaseX, phaseY, axisOverrides);
             if (!bmp)
             {
                 if (lpDx) currentX += lpDx[i] * 3;

@@ -111,7 +111,10 @@ add_custom_command(TARGET PureType POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
         ${CMAKE_CURRENT_SOURCE_DIR}/src/puretype.ico
         $<TARGET_FILE_DIR:PureType>/puretype.ico
-        COMMENT "Copying puretype.ini and puretype.ico to output directory"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+        ${CMAKE_CURRENT_SOURCE_DIR}/font
+        $<TARGET_FILE_DIR:PureType>/font
+        COMMENT "Copying puretype.ini, puretype.ico and font/ to output directory"
 )
 
 set_target_properties(PureType PROPERTIES

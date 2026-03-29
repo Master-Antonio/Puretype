@@ -42,14 +42,14 @@ namespace puretype
     // OLED gamma: softer in shadows (gamma ≈ 2.0), hermite blend to sRGB above.
     inline float OLEDToLinearExact(float s)
     {
-        constexpr float kLow  = 0.18f; // pure OLED gamma below this
+        constexpr float kLow = 0.18f; // pure OLED gamma below this
         constexpr float kHigh = 0.25f; // pure sRGB above this
 
         float linOLED = std::pow(s, 2.0f); // gamma 2.0 — softer shadows
         float linSRGB = sRGBToLinearExact(s);
 
-        if (s <= kLow)  return linOLED;
-        if (s >= kHigh)  return linSRGB;
+        if (s <= kLow) return linOLED;
+        if (s >= kHigh) return linSRGB;
 
         // Smooth hermite blend in transition zone
         float t = (s - kLow) / (kHigh - kLow);

@@ -28,6 +28,25 @@
 
 extern void PureTypeLog(const char* fmt, ...);
 
+// ── Inter font detection helper ──────────────────────────────────────
+// Checks whether the given font file path belongs to the Inter variable font.
+// Case-insensitive substring match on the filename portion.
+static bool IsInterFont(const std::string& fontPath)
+{
+    // Find the last path separator to isolate the filename.
+    auto pos = fontPath.find_last_of("\\/");
+    const std::string filename = (pos != std::string::npos)
+                                     ? fontPath.substr(pos + 1)
+                                     : fontPath;
+
+    // Case-insensitive check for "inter" in the filename.
+    std::string lower = filename;
+    for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    return lower.find("inter") != std::string::npos &&
+        lower.find("variable") != std::string::npos;
+}
+
 
 namespace puretype::hooks
 {
@@ -551,7 +570,7 @@ namespace puretype::hooks
                 ID2D1HwndRenderTarget* hwndRT = nullptr;
                 if (SUCCEEDED(
                         renderTarget->QueryInterface(__uuidof(ID2D1HwndRenderTarget),
-                                                     reinterpret_cast<void**>(&hwndRT))) &&
+                            reinterpret_cast<void**>(&hwndRT))) &&
                     hwndRT)
                 {
                     if (HWND hwnd = hwndRT->GetHwnd())
@@ -588,6 +607,16 @@ namespace puretype::hooks
                                                clientDrawingEffect);
                 }
 
+                // ── Inter font axis overrides ────────────────────────────────
+                const bool isInter = IsInterFont(fontPath);
+                VariableAxisOverrides axisOverrides;
+                if (isInter)
+                {
+                    if (renderCfg.interFontWeight > 0)
+                        axisOverrides.weight = renderCfg.interFontWeight;
+                    if (renderCfg.interOpticalSize > 0.f)
+                        axisOverrides.opticalSize = renderCfg.interOpticalSize;
+                }
                 FLOAT pixelsPerDip = 1.0f;
 
                 // Hardware Scale Synchronization:
@@ -735,12 +764,19 @@ namespace puretype::hooks
                 uint16_t fontWeight = 400;
                 IDWriteFontFace3* fontFace3 = nullptr;
                 if (SUCCEEDED(glyphRun->fontFace->QueryInterface(__uuidof(IDWriteFontFace3),
-                                                                 reinterpret_cast<void**>(&fontFace3))) &&
+                        reinterpret_cast<void**>(&fontFace3))) &&
                     fontFace3)
                 {
                     fontWeight = static_cast<uint16_t>(std::clamp(
                         static_cast<int>(fontFace3->GetWeight()), 100, 900));
                     fontFace3->Release();
+                }
+
+                // Override fontWeight for Inter so stem darkening uses the
+                // user-specified axis value consistently.
+                if (isInter && axisOverrides.weight > 0)
+                {
+                    fontWeight = static_cast<uint16_t>(std::clamp(axisOverrides.weight, 100, 900));
                 }
 
                 auto computePhase = [](FLOAT logicalCoord, FLOAT ppd) -> uint8_t
@@ -771,7 +807,8 @@ namespace puretype::hooks
                     const uint8_t phaseY = computePhase(baselineOriginY - offsetY, pixelsPerDip);
 
                     const GlyphBitmap* glyph = FTRasterizer::Instance().RasterizeGlyph(
-                        fontPath, glyphRun->glyphIndices[i], pixelSize, renderCfg, fontWeight, phaseX, phaseY);
+                        fontPath, glyphRun->glyphIndices[i], pixelSize, renderCfg, fontWeight, phaseX, phaseY,
+                        axisOverrides);
                     if (!glyph)
                     {
                         return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
@@ -791,9 +828,17 @@ namespace puretype::hooks
                         glyphY -= offsetY;
                     }
 
-                    const FLOAT advance = glyphRun->glyphAdvances
-                                              ? glyphRun->glyphAdvances[i]
-                                              : (static_cast<FLOAT>(glyph->advanceX) / 3.0f) / pixelsPerDip;
+                    FLOAT advance = glyphRun->glyphAdvances
+                                        ? glyphRun->glyphAdvances[i]
+                                        : (static_cast<FLOAT>(glyph->advanceX) / 3.0f) / pixelsPerDip;
+
+                    // Apply Inter letter spacing: add extra spacing (in DIP) between glyphs.
+                    if (isInter && renderCfg.interLetterSpacing != 0.f &&
+                        i + 1 < glyphRun->glyphCount)
+                    {
+                        advance += renderCfg.interLetterSpacing / pixelsPerDip;
+                    }
+
                     penX += advance;
 
                     if (glyph->width <= 0 || glyph->height <= 0 || glyph->data.empty())

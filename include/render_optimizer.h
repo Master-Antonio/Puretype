@@ -77,7 +77,7 @@ namespace puretype
     }
 
     inline std::array<float, 3> SolveConstrainedLumaChroma(const std::array<float, 3>& m,
-                                                            const float targetY)
+                                                           const float targetY)
     {
         constexpr std::array<float, 3> kW = {0.2126f, 0.7152f, 0.0722f};
 

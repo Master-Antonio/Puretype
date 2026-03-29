@@ -63,22 +63,26 @@ namespace puretype
         };
 
         // Base chroma policy by glyph size.
+        // Higher values preserve more per-channel subpixel detail, improving
+        // perceived sharpness at the cost of slightly more color fringing.
+        // Previous values (0.70-0.83 for QD) were too aggressive and caused
+        // visible loss of crispness compared to stock ClearType.
         float chromaKeepBase;
         if (tinyText)
         {
-            chromaKeepBase = qdPanel ? 0.70f : 0.72f;
+            chromaKeepBase = qdPanel ? 0.78f : 0.77f;
         }
         else if (smallText)
         {
-            chromaKeepBase = qdPanel ? 0.75f : 0.77f;
+            chromaKeepBase = qdPanel ? 0.82f : 0.80f;
         }
         else if (bitmap.height <= 32)
         {
-            chromaKeepBase = qdPanel ? 0.80f : 0.82f;
+            chromaKeepBase = qdPanel ? 0.86f : 0.84f;
         }
         else
         {
-            chromaKeepBase = qdPanel ? 0.83f : 0.85f;
+            chromaKeepBase = qdPanel ? 0.88f : 0.87f;
         }
 
         // Font weight aware adjustment: thinner glyphs tolerate slightly less chroma.
@@ -177,13 +181,12 @@ namespace puretype
 
                 float targetY = applyReadabilityFast(yCov);
 
-                if (cfg.oledGammaOutput > 1.001f)
-                {
-                    covR = std::pow(covR, cfg.oledGammaOutput);
-                    covG = std::pow(covG, cfg.oledGammaOutput);
-                    covB = std::pow(covB, cfg.oledGammaOutput);
-                    targetY = std::pow(targetY, cfg.oledGammaOutput);
-                }
+                // NOTE: oledGammaOutput is no longer applied here.
+                // Coverage masks are geometric coefficients (α ∈ [0,1]),
+                // not luminance values. pow(α, γ) with γ>1 crushes edge
+                // coverage (0.7 → 0.49 at γ=2), destroying anti-aliasing
+                // sharpness. Display gamma compensation is applied
+                // post-compositing in the Blender instead.
 
                 if (std::abs(toneStrength - 1.0f) > 0.001f)
                 {

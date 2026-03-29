@@ -17,6 +17,15 @@
 
 extern void PureTypeLog(const char* fmt, ...);
 
+// ── Inter font detection helper (GDI path) ──────────────────────────
+// Checks whether the LOGFONT face name is "Inter" or "Inter Variable".
+static bool IsInterFontGDI(const wchar_t* faceName)
+{
+    if (!faceName) return false;
+    // Case-insensitive prefix match: "Inter" covers "Inter", "Inter Variable", etc.
+    return (_wcsnicmp(faceName, L"Inter", 5) == 0);
+}
+
 
 namespace puretype::hooks
 {
@@ -231,7 +240,7 @@ namespace puretype::hooks
         HFONT m_ctFont = nullptr;
         bool m_active = false;
 
-        explicit ForceSubpixelRender(HDC hdc)
+        explicit ForceSubpixelRender(HDC hdc, const ConfigData* cfg = nullptr)
         {
             m_hdc = hdc;
             HFONT origFont = static_cast<HFONT>(GetCurrentObject(hdc, OBJ_FONT));
@@ -240,16 +249,39 @@ namespace puretype::hooks
             LOGFONTW lf = {};
             if (GetObjectW(origFont, sizeof(lf), &lf) == 0) return;
 
-            // Already ClearType — no work needed.
+            // Override weight for Inter font when configured.
+            const bool isInter = IsInterFontGDI(lf.lfFaceName);
+            bool needsClone = false;
+
+            if (isInter && cfg && cfg->interFontWeight > 0)
+            {
+                lf.lfWeight = static_cast<LONG>(cfg->interFontWeight);
+                needsClone = true;
+            }
+
+            // Already ClearType — only clone if we need to override weight.
             if (lf.lfQuality == CLEARTYPE_QUALITY ||
                 lf.lfQuality == CLEARTYPE_NATURAL_QUALITY)
             {
-                m_active = true; // mark active so destructor is a no-op
+                if (!needsClone)
+                {
+                    m_active = true; // mark active so destructor is a no-op
+                    return;
+                }
+            }
+            else
+            {
+                // Clone with ClearType quality.
+                lf.lfQuality = CLEARTYPE_QUALITY;
+                needsClone = true;
+            }
+
+            if (!needsClone)
+            {
+                m_active = true;
                 return;
             }
 
-            // Clone with ClearType quality.
-            lf.lfQuality = CLEARTYPE_QUALITY;
             m_ctFont = CreateFontIndirectW(&lf);
             if (!m_ctFont) return;
 
@@ -353,11 +385,13 @@ namespace puretype::hooks
 
         // chromaKeep -----------------------------------------------------------
         // Base value from glyph height; per-pixel adaptive modulation in Pass 3.
+        // Higher values preserve more per-channel subpixel detail, improving
+        // perceived sharpness at the cost of slightly more color fringing.
         float chromaKeepBase;
-        if (tinyText) chromaKeepBase = qdPanel ? 0.70f : 0.72f;
-        else if (smallText) chromaKeepBase = qdPanel ? 0.75f : 0.77f;
-        else if (h <= 32) chromaKeepBase = qdPanel ? 0.80f : 0.82f;
-        else chromaKeepBase = qdPanel ? 0.83f : 0.85f;
+        if (tinyText) chromaKeepBase = qdPanel ? 0.78f : 0.77f;
+        else if (smallText) chromaKeepBase = qdPanel ? 0.82f : 0.80f;
+        else if (h <= 32) chromaKeepBase = qdPanel ? 0.86f : 0.84f;
+        else chromaKeepBase = qdPanel ? 0.88f : 0.87f;
 
         // Font-weight aware adjustment: thin fonts are more sensitive to fringing.
         if (fontWeight > 0)
@@ -657,7 +691,8 @@ namespace puretype::hooks
             if (qdPanel && hasPrevRow)
             {
                 const int shift = (row % 2 == 0) ? 1 : -1;
-                constexpr float kVertBlend = 0.10f; // minimal — pixel resolution is coarse
+                // Vertical blend modulated by filterStrength — matches DWrite path.
+                const float kVertBlend = 0.10f * std::min(toneStrength, 1.0f);
 
                 for (int col = 0; col < w; ++col)
                 {
@@ -752,23 +787,36 @@ namespace puretype::hooks
 
                 float finalCovR, finalCovG, finalCovB;
 
+                // filterStrength modulates how much OLED correction is applied.
+                // At 1.0: full physical-subpixel remapping.
+                // At 0.75 (default): 75% OLED correction + 25% stock ClearType.
+                // This preserves more of the original sharpness/weight at
+                // the cost of slightly more color fringing.
+                const float oledBlend = std::min(toneStrength, 1.0f);
+
                 if (qdGen1)
                 {
-                    finalCovR = maskR * 0.66f + maskG * 0.34f;
+                    const float oledR = maskR * 0.66f + maskG * 0.34f;
+                    const float oledB = maskG * 0.34f + maskB * 0.66f;
+                    finalCovR = maskR + (oledR - maskR) * oledBlend;
                     finalCovG = maskG;
-                    finalCovB = maskG * 0.34f + maskB * 0.66f;
+                    finalCovB = maskB + (oledB - maskB) * oledBlend;
                 }
                 else if (qdGen3)
                 {
-                    finalCovR = maskR * 0.75f + maskG * 0.25f;
+                    const float oledR = maskR * 0.75f + maskG * 0.25f;
+                    const float oledB = maskG * 0.25f + maskB * 0.75f;
+                    finalCovR = maskR + (oledR - maskR) * oledBlend;
                     finalCovG = maskG;
-                    finalCovB = maskG * 0.25f + maskB * 0.75f;
+                    finalCovB = maskB + (oledB - maskB) * oledBlend;
                 }
                 else if (qdGen4)
                 {
-                    finalCovR = maskR * 0.75f + maskG * 0.25f;
+                    const float oledR = maskR * 0.75f + maskG * 0.25f;
+                    const float oledB = maskG * 0.25f + maskB * 0.75f;
+                    finalCovR = maskR + (oledR - maskR) * oledBlend;
                     finalCovG = maskG;
-                    finalCovB = maskG * 0.25f + maskB * 0.75f;
+                    finalCovB = maskB + (oledB - maskB) * oledBlend;
                 }
                 else if (rgwbPanel)
                 {
@@ -841,18 +889,11 @@ namespace puretype::hooks
                 finalCovB = scurve(finalCovB);
                 float targetY = scurve(yCov);
 
-                // -------------------------------------------------------------
-                // Point 2: OLED gamma correction
-                // OLED black floor = 0 (vs LCD ~0.2 cd/m²). Mid-coverage text appears
-                // lighter than intended. Power > 1.0 darkens mid-tones.
-                // cfg.oledGammaOutput: 1.0 = off, 1.2 recommended for WOLED, 1.15 for QD-OLED.
-                if (cfg.oledGammaOutput > 1.001f)
-                {
-                    finalCovR = std::pow(finalCovR, cfg.oledGammaOutput);
-                    finalCovG = std::pow(finalCovG, cfg.oledGammaOutput);
-                    finalCovB = std::pow(finalCovB, cfg.oledGammaOutput);
-                    targetY = std::pow(targetY, cfg.oledGammaOutput);
-                }
+                // NOTE: oledGammaOutput is applied POST-COMPOSITING (below),
+                // not here on coverage masks. Coverage masks are geometric
+                // coefficients (α), not luminance values. Applying pow(α, γ)
+                // with γ>1 crushes edge coverage and destroys sharpness.
+                // See: Microsoft Research "Gamma-Correct Rendering" (2003).
 
                 if (std::abs(toneStrength - 1.0f) > 0.001f)
                 {
@@ -879,9 +920,39 @@ namespace puretype::hooks
                 const float bgG_lin = rowBgG[col];
                 const float bgB_lin = rowBgB[col];
 
-                const float outR = bgR_lin * (1.0f - finalCovR) + linTextR * finalCovR;
-                const float outG = bgG_lin * (1.0f - finalCovG) + linTextG * finalCovG;
-                const float outB = bgB_lin * (1.0f - finalCovB) + linTextB * finalCovB;
+                float outR = bgR_lin * (1.0f - finalCovR) + linTextR * finalCovR;
+                float outG = bgG_lin * (1.0f - finalCovG) + linTextG * finalCovG;
+                float outB = bgB_lin * (1.0f - finalCovB) + linTextB * finalCovB;
+
+                // --- OLED display gamma compensation (post-compositing) ---
+                // Applied to the composited pixel, not the coverage mask.
+                // Compensates for OLED's electroluminescent response: on
+                // self-emissive displays, mid-tone text can appear lighter
+                // than on LCDs (no backlight bleed to anchor black). This
+                // correction operates on the actual pixel intensity that
+                // the display will emit, which is the physically correct
+                // domain for gamma compensation.
+                //
+                // cfg.gamma > 1.0 darkens the composited text pixel to
+                // compensate for OLED's brighter mid-tone perception.
+                // Formula: apply pow(pixel, gamma/sRGB_gamma) to the text
+                // contribution only, preserving the background.
+                if (cfg.gamma > 1.001f)
+                {
+                    const float gammaCorr = cfg.gamma;
+                    // Isolate text contribution and apply gamma.
+                    // Guard: only modify pixels where coverage is non-trivial.
+                    const float covMax = std::max({finalCovR, finalCovG, finalCovB});
+                    if (covMax > 0.01f)
+                    {
+                        outR = bgR_lin + (outR - bgR_lin) * std::pow(covMax, gammaCorr - 1.0f);
+                        outG = bgG_lin + (outG - bgG_lin) * std::pow(covMax, gammaCorr - 1.0f);
+                        outB = bgB_lin + (outB - bgB_lin) * std::pow(covMax, gammaCorr - 1.0f);
+                        outR = std::clamp(outR, 0.0f, 1.0f);
+                        outG = std::clamp(outG, 0.0f, 1.0f);
+                        outB = std::clamp(outB, 0.0f, 1.0f);
+                    }
+                }
 
                 oRow[col * 4 + 0] = linearToSRGB(outB);
                 oRow[col * 4 + 1] = linearToSRGB(outG);
@@ -1047,7 +1118,7 @@ namespace puretype::hooks
         // The AlphaBlend writeback (alpha=0 for background pixels) means we never
         // overwrite compositor content regardless of what GDI puts in those pixels.
         {
-            ForceSubpixelRender ctGuard(hdc);
+            ForceSubpixelRender ctGuard(hdc, &cfg);
 
             BOOL result = g_OrigExtTextOutW(hdc, x, y, options,
                                             lprc, lpString, cbCount, lpDx);

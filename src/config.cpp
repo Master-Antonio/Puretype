@@ -162,7 +162,7 @@ namespace puretype
         std::string hintingStr = ToLower(GetValue("enablesubpixelhinting", "true", monitorName));
         data.enableSubpixelHinting = (hintingStr == "true" || hintingStr == "1" || hintingStr == "yes");
 
-        std::string fracPosStr = ToLower(GetValue("enablefractionalpositioning", "true", monitorName));
+        std::string fracPosStr = ToLower(GetValue("enablefractionalpositioning", "false", monitorName));
         data.enableFractionalPositioning = (fracPosStr == "true" || fracPosStr == "1" || fracPosStr == "yes");
 
         try { data.lodThresholdSmall = std::stof(GetValue("lodthresholdsmall", "12.0", monitorName)); }
@@ -178,15 +178,15 @@ namespace puretype
         catch (...) { data.woledCrossTalkReduction = 0.08f; }
         data.woledCrossTalkReduction = std::clamp(data.woledCrossTalkReduction, 0.0f, 1.0f);
 
-        try { data.lumaContrastStrength = std::stof(GetValue("lumacontraststrength", "1.0", monitorName)); }
-        catch (...) { data.lumaContrastStrength = 1.0f; }
+        try { data.lumaContrastStrength = std::stof(GetValue("lumacontraststrength", "1.20", monitorName)); }
+        catch (...) { data.lumaContrastStrength = 1.20f; }
         data.lumaContrastStrength = std::clamp(data.lumaContrastStrength, 1.0f, 3.0f);
 
         std::string stemStr = ToLower(GetValue("stemdarkeningenabled", "true", monitorName));
         data.stemDarkeningEnabled = (stemStr == "true" || stemStr == "1" || stemStr == "yes");
 
-        try { data.stemDarkeningStrength = std::stof(GetValue("stemdarkeningstrength", "0.4", monitorName)); }
-        catch (...) { data.stemDarkeningStrength = 0.4f; }
+        try { data.stemDarkeningStrength = std::stof(GetValue("stemdarkeningstrength", "0.45", monitorName)); }
+        catch (...) { data.stemDarkeningStrength = 0.45f; }
         data.stemDarkeningStrength = std::clamp(data.stemDarkeningStrength, 0.0f, 2.0f);
 
         std::string gammaStr = ToLower(GetValue("gammamode", "srgb", monitorName));
@@ -199,6 +199,19 @@ namespace puretype
         try { data.highDpiThresholdHigh = std::stof(GetValue("highdpithresholdhigh", "216.0", monitorName)); }
         catch (...) { data.highDpiThresholdHigh = 216.0f; }
         data.highDpiThresholdHigh = std::clamp(data.highDpiThresholdHigh, data.highDpiThresholdLow + 1.0f, 600.0f);
+
+        // Inter variable font axis settings (global, used by UI)
+        try { data.interFontWeight = std::stoi(GetValue("interfontweight", "400", monitorName)); }
+        catch (...) { data.interFontWeight = 400; }
+        data.interFontWeight = std::clamp(data.interFontWeight, 100, 900);
+
+        try { data.interOpticalSize = std::stof(GetValue("interopticalsize", "18.0", monitorName)); }
+        catch (...) { data.interOpticalSize = 18.0f; }
+        data.interOpticalSize = std::clamp(data.interOpticalSize, 14.0f, 32.0f);
+
+        try { data.interLetterSpacing = std::stof(GetValue("interletterspacing", "0.3", monitorName)); }
+        catch (...) { data.interLetterSpacing = 0.3f; }
+        data.interLetterSpacing = std::clamp(data.interLetterSpacing, -2.0f, 4.0f);
 
         std::string debugStr = ToLower(GetValue("enabled", "false", monitorName));
         data.debugEnabled = (debugStr == "true" || debugStr == "1" || debugStr == "yes");
