@@ -44,9 +44,8 @@ namespace puretype
         if (darkenAmount <= 0.0f || coverage <= 0.0f) return coverage;
         coverage = std::clamp(coverage, 0.0f, 1.0f);
 
-        // CPU OPTIMIZATION: Exact parabolic match for the power function
-        // 1.0f - std::pow(1.0f - coverage, 1.0f + darkenAmount)
-        // Perfectly eliminates slow FPU cycle stalls inside the per-pixel engine core.
-        return coverage + darkenAmount * coverage * (1.0f - coverage);
+        const float exponent = 1.0f + darkenAmount;
+        const float darkened = 1.0f - std::pow(1.0f - coverage, exponent);
+        return std::clamp(darkened, coverage, 1.0f);
     }
 }

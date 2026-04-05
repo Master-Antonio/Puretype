@@ -34,6 +34,26 @@ namespace puretype
         float lodThresholdLarge = 24.0f;
         float woledCrossTalkReduction = 0.0f;
         float lumaContrastStrength = 1.20f;
+
+        // Wave rollout toggles (default: ON).
+        // dwriteFallbackV2Enabled gates optional fallback-reduction heuristics only.
+        // Atomic transactional DrawGlyphRun safety remains always-on.
+        bool toneParityV2Enabled = true;
+        bool dwriteFallbackV2Enabled = true;
+        bool contrastSamplingCacheEnabled = true;
+        bool colorGlyphBypassEnabled = true;
+
+        // Family-level calibration knobs (no per-monitor database required).
+        // Expected R-B centroid separation used by fractional-position correction.
+        float qdExpectedSepGen1 = -0.44f;
+        float qdExpectedSepGen3 = -0.50f;
+        float qdExpectedSepGen4 = -0.50f;
+        // QD triangular vertical blend amount used in both GDI and DWrite paths.
+        float qdVerticalBlend = 0.15f;
+        // Chroma retention multipliers by panel family.
+        float chromaKeepScaleQD = 1.0f;
+        float chromaKeepScaleWOLED = 1.0f;
+
         // Optional runtime hints used by ToneMapper for adaptive chroma behavior.
         // textContrastHint: [0..1], <0 disables the hint.
         float textContrastHint = -1.0f;
@@ -66,8 +86,9 @@ namespace puretype
     public:
         bool LoadFromFile(const std::string& iniPath, const std::string& processName);
 
-        // Returns thread-safe references to monitor-specific config overrides
-        const ConfigData& GetData(const std::string& monitorName = "");
+        // Returns a snapshot of monitor-specific config overrides.
+        // Returning by value avoids exposing cache references across lock boundaries.
+        ConfigData GetData(const std::string& monitorName = "");
 
         static Config& Instance();
 
@@ -86,6 +107,8 @@ namespace puretype
         // Context-aware value fetcher (Process > Monitor > General)
         std::string GetValue(const std::string& key, const std::string& defaultVal,
                              const std::string& monitorName = "") const;
+
+        static std::string NormalizeMonitorName(const std::string& rawMonitorName);
 
         ConfigData ParseConfigData(const std::string& monitorName) const;
     };

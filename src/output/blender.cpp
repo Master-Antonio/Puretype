@@ -1,4 +1,5 @@
 #include "output/blender.h"
+#include "output/tone_parity.h"
 #include "filters/subpixel_filter.h"
 #include "color_math.h"
 #include "config.h"
@@ -43,8 +44,10 @@ namespace puretype
                             COLORREF textColor,
                             float gamma)
     {
-        (void)gamma;
         if (bitmap.data.empty() || bitmap.width <= 0 || bitmap.height <= 0) return false;
+
+        const float clampedGamma = std::clamp(gamma, 0.5f, 3.0f);
+        const float invCoverageGamma = 1.0f / clampedGamma;
 
         float linTextR = sRGBToLinear(GetRValue(textColor));
         float linTextG = sRGBToLinear(GetGValue(textColor));
@@ -103,9 +106,9 @@ namespace puretype
                 // Per-channel subpixel blending in linear light.
                 // This is the CORRECT path: GDI gives us direct pixel access,
                 // so we can do true per-channel alpha blending.
-                float maskB = sRGBToLinear(srcPx[0]);
-                float maskG = sRGBToLinear(srcPx[1]);
-                float maskR = sRGBToLinear(srcPx[2]);
+                float maskB = std::pow(std::clamp(sRGBToLinear(srcPx[0]), 0.0f, 1.0f), invCoverageGamma);
+                float maskG = std::pow(std::clamp(sRGBToLinear(srcPx[1]), 0.0f, 1.0f), invCoverageGamma);
+                float maskR = std::pow(std::clamp(sRGBToLinear(srcPx[2]), 0.0f, 1.0f), invCoverageGamma);
 
                 float bgB = sRGBToLinear(dstPx[0]);
                 float bgG = sRGBToLinear(dstPx[1]);
@@ -135,15 +138,20 @@ namespace puretype
                                   const RGBABitmap& bitmap,
                                   const D2D1_COLOR_F& textColor,
                                   float gamma,
+                                  float oledGammaOutput,
+                                  bool toneParityV2Enabled,
                                   float pixelsPerDip)
     {
-        (void)gamma;
-        (void)pixelsPerDip;
         if (!pRT || bitmap.data.empty()) return false;
+
+        const float clampedGamma = std::clamp(gamma, 0.5f, 3.0f);
+        const float invCoverageGamma = 1.0f / clampedGamma;
+        const float postGamma = ComputeToneParityPostGamma(gamma, oledGammaOutput);
 
         float linR = sRGBToLinear(static_cast<uint8_t>(std::clamp(textColor.r, 0.0f, 1.0f) * 255.0f + 0.5f));
         float linG = sRGBToLinear(static_cast<uint8_t>(std::clamp(textColor.g, 0.0f, 1.0f) * 255.0f + 0.5f));
         float linB = sRGBToLinear(static_cast<uint8_t>(std::clamp(textColor.b, 0.0f, 1.0f) * 255.0f + 0.5f));
+        const float textAlpha = std::clamp(textColor.a, 0.0f, 1.0f);
 
         std::vector<uint8_t> colorized(bitmap.data.size());
 
@@ -161,9 +169,32 @@ namespace puretype
                     continue;
                 }
 
-                float maskB = sRGBToLinear(srcPx[0]);
-                float maskG = sRGBToLinear(srcPx[1]);
-                float maskR = sRGBToLinear(srcPx[2]);
+                float maskB = std::clamp(sRGBToLinear(srcPx[0]), 0.0f, 1.0f);
+                float maskG = std::clamp(sRGBToLinear(srcPx[1]), 0.0f, 1.0f);
+                float maskR = std::clamp(sRGBToLinear(srcPx[2]), 0.0f, 1.0f);
+
+                if (toneParityV2Enabled)
+                {
+                    // Match GDI parity semantics by scaling effective coverage.
+                    // D2D composition does not expose destination background here,
+                    // so we modulate mask coverage directly before premultiplied blit.
+                    const float coverageMax = std::max({maskR, maskG, maskB});
+                    float parityFactor = 1.0f;
+                    if (coverageMax > 0.01f && postGamma > 1.001f)
+                    {
+                        parityFactor = std::pow(coverageMax, postGamma - 1.0f);
+                    }
+
+                    maskB = std::clamp(maskB * parityFactor, 0.0f, 1.0f);
+                    maskG = std::clamp(maskG * parityFactor, 0.0f, 1.0f);
+                    maskR = std::clamp(maskR * parityFactor, 0.0f, 1.0f);
+                }
+                else
+                {
+                    maskB = std::pow(maskB, invCoverageGamma);
+                    maskG = std::pow(maskG, invCoverageGamma);
+                    maskR = std::pow(maskR, invCoverageGamma);
+                }
 
                 float outB = linB * maskB;
                 float outG = linG * maskG;
@@ -171,14 +202,22 @@ namespace puretype
 
                 // Premultiplied alpha invariant for DXGI_FORMAT_B8G8R8A8_UNORM.
                 // The raw byte values must satisfy: R_byte <= A_byte, G_byte <= A_byte, B_byte <= A_byte.
-                uint8_t byteB = linearToSRGB(outB);
-                uint8_t byteG = linearToSRGB(outG);
-                uint8_t byteR = linearToSRGB(outR);
+                const uint8_t baseB = linearToSRGB(outB);
+                const uint8_t baseG = linearToSRGB(outG);
+                const uint8_t baseR = linearToSRGB(outR);
+
+                const uint8_t byteB = static_cast<uint8_t>(std::clamp(baseB * textAlpha + 0.5f, 0.0f, 255.0f));
+                const uint8_t byteG = static_cast<uint8_t>(std::clamp(baseG * textAlpha + 0.5f, 0.0f, 255.0f));
+                const uint8_t byteR = static_cast<uint8_t>(std::clamp(baseR * textAlpha + 0.5f, 0.0f, 255.0f));
+
+                const float maskAlpha = std::max({maskR, maskG, maskB});
+                const uint8_t coverageAlpha = static_cast<uint8_t>(
+                    std::clamp(maskAlpha * textAlpha * 255.0f + 0.5f, 0.0f, 255.0f));
 
                 dstPx[0] = byteB;
                 dstPx[1] = byteG;
                 dstPx[2] = byteR;
-                dstPx[3] = std::max({byteR, byteG, byteB});
+                dstPx[3] = std::max<uint8_t>(coverageAlpha, std::max({byteR, byteG, byteB}));
             }
         }
 

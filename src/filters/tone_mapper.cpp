@@ -1,6 +1,7 @@
 #include "filters/subpixel_filter.h"
 #include "filters/tone_mapper.h"
 #include "color_math.h"
+#include "output/tone_parity.h"
 #include "render_optimizer.h"
 
 #include <algorithm>
@@ -22,9 +23,12 @@ namespace puretype
         const bool tinyText = (bitmap.height <= 18);
         const bool smallText = (bitmap.height <= 24);
         const float sizeBoost = std::clamp((24.0f - static_cast<float>(bitmap.height)) / 24.0f, 0.0f, 1.0f);
+        const float lodFactor = ComputeLodTransitionFactor(static_cast<float>(bitmap.height),
+                                                           cfg.lodThresholdSmall,
+                                                           cfg.lodThresholdLarge);
 
-        const float contrastStrength = cfg.lumaContrastStrength;
-        const float toneStrength = std::clamp(cfg.filterStrength, 0.0f, 5.0f);
+        const float contrastStrength = cfg.lumaContrastStrength * (1.0f + (1.0f - lodFactor) * 0.08f);
+        const float toneStrength = std::clamp(cfg.filterStrength * (0.85f + 0.15f * lodFactor), 0.0f, 5.0f);
 
         // S-curve parameters.
         float expBase = (qdPanel ? 1.01f : 1.03f) * (1.0f + (contrastStrength - 1.0f) * 0.5f);
@@ -40,8 +44,9 @@ namespace puretype
         const float gainBase = qdPanel ? 1.000f : 1.004f;
         const float gainSize = qdPanel ? 0.008f : 0.012f;
 
-        const float finalExp = expBase + expSize * sizeBoost;
-        const float finalGain = gainBase + gainSize * sizeBoost;
+        const float lodReadabilityScale = 1.0f + (1.0f - lodFactor) * 0.10f;
+        const float finalExp = (expBase + expSize * sizeBoost) * lodReadabilityScale;
+        const float finalGain = (gainBase + gainSize * sizeBoost) * (1.0f + (1.0f - lodFactor) * 0.02f);
 
         constexpr int LUT_SIZE = 1024;
         float readabilityLUT[LUT_SIZE];
@@ -84,6 +89,10 @@ namespace puretype
         {
             chromaKeepBase = qdPanel ? 0.88f : 0.87f;
         }
+
+        const float chromaFamilyScale = qdPanel ? cfg.chromaKeepScaleQD : cfg.chromaKeepScaleWOLED;
+        chromaKeepBase *= std::clamp(chromaFamilyScale, 0.60f, 1.30f);
+        chromaKeepBase *= 0.82f + 0.18f * lodFactor;
 
         // Font weight aware adjustment: thinner glyphs tolerate slightly less chroma.
         if (bitmap.fontWeight > 0)

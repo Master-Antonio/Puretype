@@ -64,6 +64,12 @@
                                     <TextBlock Text="Profiles" VerticalAlignment="Center"/>
                                 </StackPanel>
                             </RadioButton>
+                            <RadioButton x:Name="TabAdvanced" Style="{StaticResource SidebarTab}" Checked="Tab_Checked">
+                                <StackPanel Orientation="Horizontal">
+                                    <TextBlock Text="&#xE7BE;" FontFamily="Segoe MDL2 Assets" FontSize="14" Width="22" VerticalAlignment="Center" Foreground="{DynamicResource BrushTextSecondary}"/>
+                                    <TextBlock Text="Advanced" VerticalAlignment="Center"/>
+                                </StackPanel>
+                            </RadioButton>
                             <Border Height="1" Background="{DynamicResource BrushBorder}" Margin="16,10" Opacity="0.5"/>
                             <RadioButton x:Name="TabSettings" Style="{StaticResource SidebarTab}" Checked="Tab_Checked">
                                 <StackPanel Orientation="Horizontal">
@@ -316,10 +322,40 @@
                                         <Slider x:Name="ProfStemSlider" Style="{StaticResource ModernSlider}" Minimum="0" Maximum="1" Value="0.25" Margin="0,0,0,12" ValueChanged="ProfSlider_Changed"/>
                                         <Grid Margin="0,0,0,4"><TextBlock Text="WOLED Crosstalk Reduction" Style="{StaticResource FieldLabel}" Margin="0"/><TextBlock x:Name="ProfWoledValText" Text="—" HorizontalAlignment="Right" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource BrushAccent}"/></Grid>
                                         <Slider x:Name="ProfWoledSlider" Style="{StaticResource ModernSlider}" Minimum="0" Maximum="0.5" Value="0.08" Margin="0,0,0,20" ValueChanged="ProfSlider_Changed"/>
+
                                         <StackPanel Orientation="Horizontal">
                                             <Button Style="{StaticResource BtnPrimary}" Padding="14,8" FontSize="12" Click="SaveProfile_Click" Margin="0,0,8,0"><StackPanel Orientation="Horizontal"><TextBlock Text="&#xE74E;" FontFamily="Segoe MDL2 Assets" FontSize="11" VerticalAlignment="Center" Margin="0,0,5,0"/><TextBlock Text="Save Profile" VerticalAlignment="Center"/></StackPanel></Button>
                                             <Button Style="{StaticResource BtnBase}" Padding="14,8" FontSize="12" Click="DeleteProfile_Click"><StackPanel Orientation="Horizontal"><TextBlock Text="&#xE74D;" FontFamily="Segoe MDL2 Assets" FontSize="11" VerticalAlignment="Center" Margin="0,0,5,0"/><TextBlock Text="Delete Profile" VerticalAlignment="Center"/></StackPanel></Button>
                                         </StackPanel>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+                            <!-- ═══ ADVANCED ═══ -->
+                            <StackPanel x:Name="PageAdvanced" Visibility="Collapsed" Margin="0,0,0,24">
+                                <Border Style="{StaticResource Card}">
+                                    <StackPanel>
+                                        <TextBlock Text="Advanced OLED Tuning" Style="{StaticResource SectionHeader}" Margin="0,0,0,6"/>
+                                        <TextBlock Text="Fine tuning for QD expected separation and chroma keep scaling. These are global values." FontSize="11" Foreground="{DynamicResource BrushTextSecondary}" TextWrapping="Wrap" Margin="0,0,0,14"/>
+
+                                        <Grid Margin="0,0,0,4"><TextBlock Text="QD Expected Separation Gen 1" Style="{StaticResource FieldLabel}" Margin="0"/><TextBlock x:Name="QdSepGen1ValText" Text="-0.44" HorizontalAlignment="Right" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource BrushAccent}"/></Grid>
+                                        <Slider x:Name="QdSepGen1Slider" Style="{StaticResource ModernSlider}" Minimum="-1.0" Maximum="-0.1" Value="-0.44" TickFrequency="0.01" IsSnapToTickEnabled="True" Margin="0,0,0,12" ValueChanged="Setting_Changed_Slider"/>
+
+                                        <Grid Margin="0,0,0,4"><TextBlock Text="QD Expected Separation Gen 3" Style="{StaticResource FieldLabel}" Margin="0"/><TextBlock x:Name="QdSepGen3ValText" Text="-0.50" HorizontalAlignment="Right" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource BrushAccent}"/></Grid>
+                                        <Slider x:Name="QdSepGen3Slider" Style="{StaticResource ModernSlider}" Minimum="-1.0" Maximum="-0.1" Value="-0.50" TickFrequency="0.01" IsSnapToTickEnabled="True" Margin="0,0,0,12" ValueChanged="Setting_Changed_Slider"/>
+
+                                        <Grid Margin="0,0,0,4"><TextBlock Text="QD Expected Separation Gen 4" Style="{StaticResource FieldLabel}" Margin="0"/><TextBlock x:Name="QdSepGen4ValText" Text="-0.50" HorizontalAlignment="Right" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource BrushAccent}"/></Grid>
+                                        <Slider x:Name="QdSepGen4Slider" Style="{StaticResource ModernSlider}" Minimum="-1.0" Maximum="-0.1" Value="-0.50" TickFrequency="0.01" IsSnapToTickEnabled="True" Margin="0,0,0,12" ValueChanged="Setting_Changed_Slider"/>
+
+                                        <Grid Margin="0,0,0,4"><TextBlock Text="QD Vertical Blend" Style="{StaticResource FieldLabel}" Margin="0"/><TextBlock x:Name="QdVerticalBlendValText" Text="0.15" HorizontalAlignment="Right" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource BrushAccent}"/></Grid>
+                                        <Slider x:Name="QdVerticalBlendSlider" Style="{StaticResource ModernSlider}" Minimum="0.0" Maximum="0.30" Value="0.15" TickFrequency="0.01" IsSnapToTickEnabled="True" Margin="0,0,0,12" ValueChanged="Setting_Changed_Slider"/>
+
+                                        <Grid Margin="0,0,0,4"><TextBlock Text="Chroma Keep Scale (QD)" Style="{StaticResource FieldLabel}" Margin="0"/><TextBlock x:Name="ChromaKeepQdValText" Text="1.00" HorizontalAlignment="Right" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource BrushAccent}"/></Grid>
+                                        <Slider x:Name="ChromaKeepQdSlider" Style="{StaticResource ModernSlider}" Minimum="0.60" Maximum="1.30" Value="1.00" TickFrequency="0.01" IsSnapToTickEnabled="True" Margin="0,0,0,12" ValueChanged="Setting_Changed_Slider"/>
+
+                                        <Grid Margin="0,0,0,4"><TextBlock Text="Chroma Keep Scale (WOLED)" Style="{StaticResource FieldLabel}" Margin="0"/><TextBlock x:Name="ChromaKeepWoledValText" Text="1.00" HorizontalAlignment="Right" FontSize="12" FontWeight="SemiBold" Foreground="{DynamicResource BrushAccent}"/></Grid>
+                                        <Slider x:Name="ChromaKeepWoledSlider" Style="{StaticResource ModernSlider}" Minimum="0.60" Maximum="1.30" Value="1.00" TickFrequency="0.01" IsSnapToTickEnabled="True" Margin="0,0,0,16" ValueChanged="Setting_Changed_Slider"/>
+
+                                        <Button Style="{StaticResource BtnBase}" Padding="14,8" FontSize="12" Click="ResetAdvancedDefaults_Click" HorizontalAlignment="Left">Reset Advanced Defaults</Button>
                                     </StackPanel>
                                 </Border>
                             </StackPanel>
@@ -329,6 +365,7 @@
                                     <StackPanel>
                                         <TextBlock Text="System" Style="{StaticResource SectionHeader}" Margin="0,0,0,14"/>
                                         <CheckBox x:Name="StartWithWindowsCheck" Content="Start with Windows" Margin="0,0,0,10" IsChecked="False" Click="Setting_Changed_Check"/>
+                                        <CheckBox x:Name="AutoCheckUpdatesCheck" Content="Auto-check for updates on startup" Style="{StaticResource ToggleSwitch}" Margin="0,0,0,10" IsChecked="True" Click="Setting_Changed_Check"/>
                                         <CheckBox x:Name="DebugEnabledCheck" Content="Enhanced Logging" Margin="0,0,0,12" IsChecked="False" Click="Debug_Changed"/>
                                         <StackPanel x:Name="DebugOptionsPanel" Visibility="Collapsed">
                                             <CheckBox x:Name="HighlightGlyphsCheck" Content="Highlight Rendered Glyphs" Margin="0,0,0,10" Click="Setting_Changed_Check"/>
@@ -372,6 +409,55 @@
                                             <TextBlock Text="Version" FontSize="13" Foreground="{DynamicResource BrushTextSecondary}" VerticalAlignment="Center"/>
                                             <TextBlock x:Name="InfoVersionValue" FontSize="13" FontWeight="SemiBold" Foreground="{DynamicResource BrushTextPrimary}" HorizontalAlignment="Right" VerticalAlignment="Center"/>
                                         </Grid>
+                                    </StackPanel>
+                                </Border>
+                                <!-- ── UPDATE CARD ── -->
+                                <Border Style="{StaticResource Card}">
+                                    <StackPanel>
+                                        <Grid Margin="0,0,0,10">
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Text="&#xE895;" FontFamily="Segoe MDL2 Assets" FontSize="16" Foreground="{DynamicResource BrushAccent}" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                                <TextBlock Text="Updates" Style="{StaticResource SectionHeader}"/>
+                                            </StackPanel>
+                                        </Grid>
+                                        <!-- Status: checking / up to date / error -->
+                                        <TextBlock x:Name="UpdateStatusText" Text="Click the button below to check for updates." FontSize="12" Foreground="{DynamicResource BrushTextSecondary}" TextWrapping="Wrap" Margin="0,0,0,12"/>
+                                        <!-- Update available banner (hidden by default) -->
+                                        <Border x:Name="UpdateAvailableBanner" Visibility="Collapsed" Background="#1A2EA043" CornerRadius="6" Padding="14,10" Margin="0,0,0,12" BorderBrush="#2EA043" BorderThickness="1">
+                                            <StackPanel>
+                                                <StackPanel Orientation="Horizontal" Margin="0,0,0,6">
+                                                    <TextBlock Text="&#xE72C;" FontFamily="Segoe MDL2 Assets" FontSize="14" Foreground="#2EA043" VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                                    <TextBlock x:Name="UpdateVersionText" Text="" FontSize="13" FontWeight="SemiBold" Foreground="#2EA043" VerticalAlignment="Center"/>
+                                                </StackPanel>
+                                                <TextBlock x:Name="UpdateSizeText" Text="" FontSize="11" Foreground="{DynamicResource BrushTextSecondary}" Margin="0,0,0,4"/>
+                                                <TextBlock x:Name="UpdateNotesText" Text="" FontSize="11" Foreground="{DynamicResource BrushTextSecondary}" TextWrapping="Wrap" MaxHeight="80" TextTrimming="CharacterEllipsis"/>
+                                            </StackPanel>
+                                        </Border>
+                                        <!-- Progress bar (hidden by default) -->
+                                        <StackPanel x:Name="UpdateProgressPanel" Visibility="Collapsed" Margin="0,0,0,12">
+                                            <TextBlock x:Name="UpdateProgressText" Text="Downloading..." FontSize="11" Foreground="{DynamicResource BrushTextSecondary}" Margin="0,0,0,6"/>
+                                            <Border Background="{DynamicResource BrushBorder}" CornerRadius="3" Height="6">
+                                                <Border x:Name="UpdateProgressBar" Background="{DynamicResource BrushAccent}" CornerRadius="3" Height="6" HorizontalAlignment="Left" Width="0"/>
+                                            </Border>
+                                        </StackPanel>
+                                        <!-- Action buttons -->
+                                        <StackPanel Orientation="Horizontal">
+                                            <Button x:Name="CheckUpdateBtn" Style="{StaticResource BtnBase}" Padding="14,8" FontSize="12" Click="CheckForUpdates_Click" Margin="0,0,8,0">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="&#xE72C;" FontFamily="Segoe MDL2 Assets" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                                    <TextBlock Text="Check for Updates" VerticalAlignment="Center"/>
+                                                </StackPanel>
+                                            </Button>
+                                            <Button x:Name="DownloadUpdateBtn" Style="{StaticResource BtnPrimary}" Padding="14,8" FontSize="12" Click="DownloadUpdate_Click" Visibility="Collapsed">
+                                                <StackPanel Orientation="Horizontal">
+                                                    <TextBlock Text="&#xE896;" FontFamily="Segoe MDL2 Assets" FontSize="11" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                                                    <TextBlock Text="Download &amp; Install" VerticalAlignment="Center"/>
+                                                </StackPanel>
+                                            </Button>
+                                            <Button x:Name="ViewReleaseBtn" Style="{StaticResource BtnGhost}" Padding="10,8" FontSize="12" Click="ViewReleasePage_Click" Visibility="Collapsed" ToolTip="Open release page on GitHub">
+                                                <TextBlock Text="&#xE8A7;" FontFamily="Segoe MDL2 Assets" FontSize="13" Foreground="{DynamicResource BrushTextSecondary}"/>
+                                            </Button>
+                                        </StackPanel>
                                     </StackPanel>
                                 </Border>
                                 <Border Style="{StaticResource Card}">

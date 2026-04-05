@@ -1,18 +1,22 @@
-cmake_minimum_required(VERSION 3.14)
-project(PureType VERSION 0.0.2 LANGUAGES CXX)
+﻿cmake_minimum_required(VERSION 3.14)
+project(PureType VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
+# Keep FetchContent stable in existing worktrees with already-populated deps.
+# This avoids update/stash conflicts under build/_deps when tags are pinned.
+set(FETCHCONTENT_UPDATES_DISCONNECTED TRUE CACHE BOOL "" FORCE)
+
 # --- Dipendenze Esterne ---
 FetchContent_Declare(
-        minhook
+        minhook_pinned
         GIT_REPOSITORY https://github.com/TsudaKageyu/minhook.git
-        GIT_TAG master
+        GIT_TAG v1.3.4
 )
-FetchContent_MakeAvailable(minhook)
+FetchContent_MakeAvailable(minhook_pinned)
 
 FetchContent_Declare(
         freetype
@@ -101,6 +105,8 @@ if (DOTNET_EXE)
             COMMENT "Building WPF UI..."
     )
     add_dependencies(PuretypeUI PureType)
+else ()
+        message(FATAL_ERROR "dotnet not found: PuretypeUI is required and build must stop.")
 endif ()
 
 # --- Operazioni Post-Build ---

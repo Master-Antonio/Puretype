@@ -2,6 +2,7 @@
 #include "filters/tone_mapper.h"
 #include "rasterizer/ft_rasterizer.h"
 #include "color_math.h"
+#include "output/tone_parity.h"
 #include "stem_darkening.h"
 #include "config.h"
 
@@ -224,12 +225,16 @@ namespace puretype
 
         result.data.resize(result.pitch * height, 0);
 
-        const auto emSize = static_cast<float>(height);
+        const float emSize = static_cast<float>(glyph.pixelSize > 0 ? glyph.pixelSize : height);
         const float darkenAmount = cfg.stemDarkeningEnabled
                                        ? computeDarkenAmount(emSize, cfg.stemDarkeningStrength, glyph.fontWeight)
                                        : 0.0f;
 
-        const float strength = std::clamp(cfg.filterStrength, 0.0f, 2.0f);
+        const float lodFactor = ComputeLodTransitionFactor(emSize,
+                                                           cfg.lodThresholdSmall,
+                                                           cfg.lodThresholdLarge);
+        const float lodFilterScale = 0.80f + 0.20f * lodFactor;
+        const float strength = std::clamp(cfg.filterStrength * lodFilterScale, 0.0f, 2.0f);
 
         // The original 7-tap filter (1+2+3+4+3+2+1 / 16) spans 7/4 = 1.75 physical
         // pixels for WOLED's 4-slot layout. This creates visible horizontal color
@@ -358,11 +363,16 @@ namespace puretype
                                        ? computeDarkenAmount(emSize, cfg.stemDarkeningStrength, glyph.fontWeight)
                                        : 0.0f;
 
+        const float lodFactor = ComputeLodTransitionFactor(emSize,
+                                                           cfg.lodThresholdSmall,
+                                                           cfg.lodThresholdLarge);
+
         // filterStrength modulates how aggressively the OLED correction is applied.
         // At 1.0: full triangular correction (max color-fringe reduction).
         // At 0.5: 50% correction blended with sharp unfiltered coverage.
         // At 0.0: exits early in the hook (never reaches here).
-        const float strength = std::clamp(cfg.filterStrength, 0.0f, 2.0f);
+        const float lodFilterScale = 0.80f + 0.20f * lodFactor;
+        const float strength = std::clamp(cfg.filterStrength * lodFilterScale, 0.0f, 2.0f);
 
         // 3-tap FIR, symmetric — replaces the previous 5-tap which was too wide
         // and caused visible loss of sharpness. The 3-tap spans ±1 subpixel
@@ -407,7 +417,9 @@ namespace puretype
             // visible vertical softening on small text. filterStrength further
             // scales this so users can minimize blur at the cost of slight
             // triangular geometry inaccuracy.
-            const float kVertBlend = 0.15f * std::min(strength, 1.0f);
+            const float qdBlendBase = std::clamp(cfg.qdVerticalBlend, 0.0f, 0.30f)
+                * (0.85f + 0.15f * lodFactor);
+            const float kVertBlend = qdBlendBase * std::min(strength, 1.0f);
 
             for (int px = 0; px < pixelWidth; ++px)
             {

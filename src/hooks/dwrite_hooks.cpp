@@ -18,12 +18,17 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cwctype>
+#include <deque>
+#include <limits>
 #include <mutex>
 #include <new>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 extern void PureTypeLog(const char* fmt, ...);
@@ -90,6 +95,481 @@ namespace puretype::hooks
 
         std::mutex g_hookMutex;
         thread_local bool g_insideDWriteDrawGlyphRun = false;
+
+        enum class DrawGlyphRunPreflightState
+        {
+            Pass,
+            Fail,
+            Uncertain
+        };
+
+        enum class FallbackReason
+        {
+            None,
+            InvalidGlyphRun,
+            MissingGlyphIndices,
+            ReentrantCall,
+            MissingRenderTarget,
+            FilterDisabled,
+            MissingFontPath,
+            MissingFilter,
+            MissingReliableTextColor,
+            GlyphRasterizationFailed,
+            FilterApplicationFailed,
+            StagingBoundsFailure,
+            StagingAllocationFailed,
+            EmptyStagedRun,
+            TransactionCommitFailed
+        };
+
+        struct DrawGlyphRunPreflightResult
+        {
+            DrawGlyphRunPreflightState state = DrawGlyphRunPreflightState::Uncertain;
+            FallbackReason reason = FallbackReason::None;
+        };
+
+        struct DWriteGuardrailCounters
+        {
+            std::atomic<uint64_t> fallbackTotal{0};
+            std::atomic<uint64_t> fallbackUncertain{0};
+            std::atomic<uint64_t> fallbackUnsupported{0};
+            std::atomic<uint64_t> fallbackAvoidable{0};
+
+            std::atomic<uint64_t> sampleCalls{0};
+            std::atomic<uint64_t> cacheHits{0};
+            std::atomic<uint64_t> cacheMisses{0};
+        };
+
+        DWriteGuardrailCounters g_guardrailCounters;
+        std::atomic<uint64_t> g_drawGlyphRunCallCounter{0};
+
+        class SamplingLatencyWindow
+        {
+        public:
+            void Observe(const uint64_t micros)
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_samples.size() >= kMaxSamples)
+                {
+                    m_samples.pop_front();
+                }
+                m_samples.push_back(micros);
+            }
+
+            uint64_t Percentile(const double p) const
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                if (m_samples.empty()) return 0;
+
+                std::vector<uint64_t> sorted(m_samples.begin(), m_samples.end());
+                std::sort(sorted.begin(), sorted.end());
+
+                const double clamped = std::clamp(p, 0.0, 1.0);
+                const size_t index = static_cast<size_t>(std::round(
+                    clamped * static_cast<double>(sorted.size() - 1)));
+                return sorted[index];
+            }
+
+        private:
+            static constexpr size_t kMaxSamples = 1024;
+            mutable std::mutex m_mutex;
+            std::deque<uint64_t> m_samples;
+        };
+
+        SamplingLatencyWindow g_samplingLatencyWindow;
+
+        uint64_t GetSteadyMilliseconds()
+        {
+            return static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                .count());
+        }
+
+        struct SamplingCacheKey
+        {
+            uintptr_t hwnd = 0;
+            int leftQ = 0;
+            int topQ = 0;
+            int rightQ = 0;
+            int bottomQ = 0;
+
+            bool operator==(const SamplingCacheKey& o) const
+            {
+                return hwnd == o.hwnd &&
+                    leftQ == o.leftQ &&
+                    topQ == o.topQ &&
+                    rightQ == o.rightQ &&
+                    bottomQ == o.bottomQ;
+            }
+        };
+
+        struct SamplingCacheKeyHash
+        {
+            size_t operator()(const SamplingCacheKey& k) const
+            {
+                size_t h = std::hash<uintptr_t>{}(k.hwnd);
+                h ^= std::hash<int>{}(k.leftQ) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                h ^= std::hash<int>{}(k.topQ) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                h ^= std::hash<int>{}(k.rightQ) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                h ^= std::hash<int>{}(k.bottomQ) + 0x9e3779b9 + (h << 6) + (h >> 2);
+                return h;
+            }
+        };
+
+        struct SamplingCacheEntry
+        {
+            float luma = 0.0f;
+            uint64_t sampledAtMs = 0;
+            uint64_t lastAccessMs = 0;
+        };
+
+        class BackgroundSamplingCache
+        {
+        public:
+            bool TryGet(const SamplingCacheKey& key, const uint64_t nowMs, float* outLuma)
+            {
+                if (!outLuma) return false;
+
+                std::lock_guard<std::mutex> lock(m_mutex);
+                auto it = m_entries.find(key);
+                if (it == m_entries.end())
+                {
+                    return false;
+                }
+
+                if ((nowMs - it->second.sampledAtMs) > kTtlMs)
+                {
+                    m_entries.erase(it);
+                    return false;
+                }
+
+                it->second.lastAccessMs = nowMs;
+                *outLuma = it->second.luma;
+                return true;
+            }
+
+            void Put(const SamplingCacheKey& key, const float luma, const uint64_t nowMs)
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+
+                EvictExpired(nowMs);
+
+                SamplingCacheEntry& entry = m_entries[key];
+                entry.luma = std::clamp(luma, 0.0f, 1.0f);
+                entry.sampledAtMs = nowMs;
+                entry.lastAccessMs = nowMs;
+
+                if (m_entries.size() <= kMaxEntries)
+                {
+                    return;
+                }
+
+                auto oldest = m_entries.begin();
+                for (auto it = m_entries.begin(); it != m_entries.end(); ++it)
+                {
+                    if (it->second.lastAccessMs < oldest->second.lastAccessMs)
+                    {
+                        oldest = it;
+                    }
+                }
+
+                if (oldest != m_entries.end())
+                {
+                    m_entries.erase(oldest);
+                }
+            }
+
+        private:
+            static constexpr uint64_t kTtlMs = 90;
+            static constexpr size_t kMaxEntries = 1024;
+
+            void EvictExpired(const uint64_t nowMs)
+            {
+                for (auto it = m_entries.begin(); it != m_entries.end();)
+                {
+                    if ((nowMs - it->second.sampledAtMs) > kTtlMs)
+                    {
+                        it = m_entries.erase(it);
+                    }
+                    else
+                    {
+                        ++it;
+                    }
+                }
+            }
+
+            std::unordered_map<SamplingCacheKey, SamplingCacheEntry, SamplingCacheKeyHash> m_entries;
+            std::mutex m_mutex;
+        };
+
+        BackgroundSamplingCache& GetBackgroundSamplingCache()
+        {
+            static BackgroundSamplingCache cache;
+            return cache;
+        }
+
+        SamplingCacheKey BuildSamplingCacheKey(HWND hwnd, const RECT& sampleRect)
+        {
+            auto quantize = [](const int value) -> int
+            {
+                constexpr int kQuantStepPx = 8;
+                if (value >= 0)
+                {
+                    return value / kQuantStepPx;
+                }
+                return -(((-value) + kQuantStepPx - 1) / kQuantStepPx);
+            };
+
+            SamplingCacheKey key;
+            key.hwnd = reinterpret_cast<uintptr_t>(hwnd);
+            key.leftQ = quantize(sampleRect.left);
+            key.topQ = quantize(sampleRect.top);
+            key.rightQ = quantize(sampleRect.right);
+            key.bottomQ = quantize(sampleRect.bottom);
+            return key;
+        }
+
+        struct FontPathCacheEntry
+        {
+            std::string path;
+            uint64_t cachedAtMs = 0;
+        };
+
+        std::unordered_map<uintptr_t, FontPathCacheEntry> g_fontPathCache;
+        std::mutex g_fontPathCacheMutex;
+
+        void CacheFontPathForFace(IDWriteFontFace* fontFace, const std::string& path)
+        {
+            if (!fontFace || path.empty()) return;
+
+            constexpr size_t kMaxEntries = 512;
+            const uint64_t nowMs = GetSteadyMilliseconds();
+            const uintptr_t key = reinterpret_cast<uintptr_t>(fontFace);
+
+            std::lock_guard<std::mutex> lock(g_fontPathCacheMutex);
+            g_fontPathCache[key] = FontPathCacheEntry{path, nowMs};
+
+            if (g_fontPathCache.size() <= kMaxEntries)
+            {
+                return;
+            }
+
+            auto oldest = g_fontPathCache.begin();
+            for (auto it = g_fontPathCache.begin(); it != g_fontPathCache.end(); ++it)
+            {
+                if (it->second.cachedAtMs < oldest->second.cachedAtMs)
+                {
+                    oldest = it;
+                }
+            }
+            if (oldest != g_fontPathCache.end())
+            {
+                g_fontPathCache.erase(oldest);
+            }
+        }
+
+        bool TryGetCachedFontPathForFace(IDWriteFontFace* fontFace, std::string* outPath)
+        {
+            if (!fontFace || !outPath) return false;
+
+            constexpr uint64_t kMaxAgeMs = 5ull * 60ull * 1000ull;
+            const uint64_t nowMs = GetSteadyMilliseconds();
+            const uintptr_t key = reinterpret_cast<uintptr_t>(fontFace);
+
+            std::lock_guard<std::mutex> lock(g_fontPathCacheMutex);
+            auto it = g_fontPathCache.find(key);
+            if (it == g_fontPathCache.end())
+            {
+                return false;
+            }
+
+            if ((nowMs - it->second.cachedAtMs) > kMaxAgeMs)
+            {
+                g_fontPathCache.erase(it);
+                return false;
+            }
+
+            *outPath = it->second.path;
+            return !outPath->empty();
+        }
+
+        struct RecentTextColorEntry
+        {
+            D2D1_COLOR_F color{};
+            uint64_t cachedAtMs = 0;
+        };
+
+        std::unordered_map<uintptr_t, RecentTextColorEntry> g_recentTextColorCache;
+        std::mutex g_recentTextColorMutex;
+
+        void CacheRecentTextColor(ID2D1RenderTarget* renderTarget, const D2D1_COLOR_F& color)
+        {
+            if (!renderTarget) return;
+
+            constexpr size_t kMaxEntries = 512;
+            const uint64_t nowMs = GetSteadyMilliseconds();
+            const uintptr_t key = reinterpret_cast<uintptr_t>(renderTarget);
+
+            std::lock_guard<std::mutex> lock(g_recentTextColorMutex);
+            g_recentTextColorCache[key] = RecentTextColorEntry{color, nowMs};
+
+            if (g_recentTextColorCache.size() <= kMaxEntries)
+            {
+                return;
+            }
+
+            auto oldest = g_recentTextColorCache.begin();
+            for (auto it = g_recentTextColorCache.begin(); it != g_recentTextColorCache.end(); ++it)
+            {
+                if (it->second.cachedAtMs < oldest->second.cachedAtMs)
+                {
+                    oldest = it;
+                }
+            }
+
+            if (oldest != g_recentTextColorCache.end())
+            {
+                g_recentTextColorCache.erase(oldest);
+            }
+        }
+
+        bool TryGetRecentTextColor(ID2D1RenderTarget* renderTarget, D2D1_COLOR_F* outColor)
+        {
+            if (!renderTarget || !outColor) return false;
+
+            constexpr uint64_t kMaxAgeMs = 2000;
+            const uint64_t nowMs = GetSteadyMilliseconds();
+            const uintptr_t key = reinterpret_cast<uintptr_t>(renderTarget);
+
+            std::lock_guard<std::mutex> lock(g_recentTextColorMutex);
+            auto it = g_recentTextColorCache.find(key);
+            if (it == g_recentTextColorCache.end())
+            {
+                return false;
+            }
+
+            if ((nowMs - it->second.cachedAtMs) > kMaxAgeMs)
+            {
+                g_recentTextColorCache.erase(it);
+                return false;
+            }
+
+            *outColor = it->second.color;
+            return true;
+        }
+
+        bool IsColorGlyphRun(const DWRITE_GLYPH_RUN* glyphRun)
+        {
+            if (!glyphRun || !glyphRun->fontFace) return false;
+
+            IDWriteFontFace2* fontFace2 = nullptr;
+            const HRESULT hr = glyphRun->fontFace->QueryInterface(
+                __uuidof(IDWriteFontFace2), reinterpret_cast<void**>(&fontFace2));
+            if (FAILED(hr) || !fontFace2)
+            {
+                return false;
+            }
+
+            const BOOL isColorFont = fontFace2->IsColorFont();
+            fontFace2->Release();
+            return isColorFont != FALSE;
+        }
+
+        bool IsUnsupportedFallbackReason(const FallbackReason reason)
+        {
+            return reason == FallbackReason::InvalidGlyphRun ||
+                reason == FallbackReason::MissingGlyphIndices ||
+                reason == FallbackReason::MissingRenderTarget ||
+                reason == FallbackReason::MissingFilter ||
+                reason == FallbackReason::MissingFontPath;
+        }
+
+        bool IsAvoidableFallbackReason(const FallbackReason reason)
+        {
+            return reason == FallbackReason::MissingReliableTextColor ||
+                reason == FallbackReason::GlyphRasterizationFailed ||
+                reason == FallbackReason::FilterApplicationFailed;
+        }
+
+        void RecordFallback(const DrawGlyphRunPreflightState state, const FallbackReason reason)
+        {
+            if (reason == FallbackReason::None) return;
+
+            g_guardrailCounters.fallbackTotal.fetch_add(1, std::memory_order_relaxed);
+            if (state == DrawGlyphRunPreflightState::Uncertain)
+            {
+                g_guardrailCounters.fallbackUncertain.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (IsUnsupportedFallbackReason(reason))
+            {
+                g_guardrailCounters.fallbackUnsupported.fetch_add(1, std::memory_order_relaxed);
+            }
+            if (IsAvoidableFallbackReason(reason))
+            {
+                g_guardrailCounters.fallbackAvoidable.fetch_add(1, std::memory_order_relaxed);
+            }
+        }
+
+        void RecordSamplingProbe(const uint64_t elapsedMicros, const bool cacheHit)
+        {
+            g_guardrailCounters.sampleCalls.fetch_add(1, std::memory_order_relaxed);
+            if (cacheHit)
+            {
+                g_guardrailCounters.cacheHits.fetch_add(1, std::memory_order_relaxed);
+            }
+            else
+            {
+                g_guardrailCounters.cacheMisses.fetch_add(1, std::memory_order_relaxed);
+            }
+            g_samplingLatencyWindow.Observe(elapsedMicros);
+        }
+
+        void MaybeLogGuardrailCounters(const ConfigData& cfg)
+        {
+            if (!cfg.debugEnabled) return;
+
+            const uint64_t runCount = g_drawGlyphRunCallCounter.fetch_add(1, std::memory_order_relaxed) + 1;
+            if (runCount % 128 != 0) return;
+
+            const uint64_t p50 = g_samplingLatencyWindow.Percentile(0.50);
+            const uint64_t p95 = g_samplingLatencyWindow.Percentile(0.95);
+
+            PureTypeLog(
+                "DWriteGuardrails fallback_total=%llu fallback_uncertain=%llu fallback_unsupported=%llu fallback_avoidable=%llu sample_calls=%llu cache_hits=%llu cache_misses=%llu sample_time_p50_us=%llu sample_time_p95_us=%llu",
+                static_cast<unsigned long long>(g_guardrailCounters.fallbackTotal.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(g_guardrailCounters.fallbackUncertain.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(g_guardrailCounters.fallbackUnsupported.
+                                                                    load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(g_guardrailCounters.fallbackAvoidable.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(g_guardrailCounters.sampleCalls.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(g_guardrailCounters.cacheHits.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(g_guardrailCounters.cacheMisses.load(std::memory_order_relaxed)),
+                static_cast<unsigned long long>(p50),
+                static_cast<unsigned long long>(p95));
+        }
+
+        DrawGlyphRunPreflightResult EvaluateDrawGlyphRunPreflight(
+            DWRITE_GLYPH_RUN const* glyphRun,
+            const bool insideHook)
+        {
+            if (!glyphRun || glyphRun->glyphCount == 0 || !glyphRun->fontFace || glyphRun->isSideways)
+            {
+                return {DrawGlyphRunPreflightState::Fail, FallbackReason::InvalidGlyphRun};
+            }
+
+            if (!glyphRun->glyphIndices)
+            {
+                return {DrawGlyphRunPreflightState::Fail, FallbackReason::MissingGlyphIndices};
+            }
+
+            if (insideHook)
+            {
+                return {DrawGlyphRunPreflightState::Uncertain, FallbackReason::ReentrantCall};
+            }
+
+            return {DrawGlyphRunPreflightState::Pass, FallbackReason::None};
+        }
 
         // RAII guard for hook reference counting (DWrite path).
         struct DWriteHookRefGuard
@@ -344,6 +824,44 @@ namespace puretype::hooks
             return true;
         }
 
+        bool EstimateBackgroundLumaFromHwndInstrumented(HWND hwnd,
+                                                        RECT sampleRectPx,
+                                                        float* outLuma,
+                                                        const bool cacheEnabled)
+        {
+            const auto start = std::chrono::steady_clock::now();
+
+            bool cacheHit = false;
+            bool ok = false;
+            const uint64_t nowMs = GetSteadyMilliseconds();
+            const SamplingCacheKey cacheKey = BuildSamplingCacheKey(hwnd, sampleRectPx);
+
+            if (cacheEnabled)
+            {
+                cacheHit = GetBackgroundSamplingCache().TryGet(cacheKey, nowMs, outLuma);
+            }
+
+            if (cacheHit)
+            {
+                ok = true;
+            }
+            else
+            {
+                ok = EstimateBackgroundLumaFromHwnd(hwnd, sampleRectPx, outLuma);
+                if (ok && cacheEnabled)
+                {
+                    GetBackgroundSamplingCache().Put(cacheKey, *outLuma, nowMs);
+                }
+            }
+
+            const auto end = std::chrono::steady_clock::now();
+            const uint64_t elapsedUs = static_cast<uint64_t>(
+                std::chrono::duration_cast<std::chrono::microseconds>(end - start).count());
+
+            RecordSamplingProbe(elapsedUs, cacheHit);
+            return ok;
+        }
+
         std::string WideToUtf8(std::wstring const& value)
         {
             if (value.empty()) return {};
@@ -526,39 +1044,29 @@ namespace puretype::hooks
                                                    DWRITE_GLYPH_RUN_DESCRIPTION const* glyphRunDescription,
                                                    IUnknown* clientDrawingEffect) override
             {
-                if (!glyphRun || glyphRun->glyphCount == 0 || !glyphRun->fontFace || glyphRun->isSideways)
+                const DrawGlyphRunPreflightResult preflight =
+                    EvaluateDrawGlyphRunPreflight(glyphRun, g_insideDWriteDrawGlyphRun);
+                if (preflight.state != DrawGlyphRunPreflightState::Pass)
                 {
+                    RecordFallback(preflight.state, preflight.reason);
                     return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
                                                measuringMode, glyphRun, glyphRunDescription,
                                                clientDrawingEffect);
                 }
 
-                if (!glyphRun->glyphIndices)
-                {
-                    return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
-                                               measuringMode, glyphRun, glyphRunDescription,
-                                               clientDrawingEffect);
-                }
-
-                if (g_insideDWriteDrawGlyphRun)
-                {
-                    return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
-                                               measuringMode, glyphRun, glyphRunDescription,
-                                               clientDrawingEffect);
-                }
-
-                // RAII reference count — prevents rasterizer shutdown while rendering
+                // RAII reference count — prevents rasterizer shutdown while rendering.
                 DWriteHookRefGuard refGuard;
 
                 ID2D1RenderTarget* renderTarget = TryGetD2DRenderTarget(clientDrawingContext);
                 if (!renderTarget)
                 {
+                    RecordFallback(DrawGlyphRunPreflightState::Fail, FallbackReason::MissingRenderTarget);
                     return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
                                                measuringMode, glyphRun, glyphRunDescription,
                                                clientDrawingEffect);
                 }
 
-                // RAII safety logic to automatically release the target when the method exits
+                // RAII safety logic to automatically release the target when the method exits.
                 struct RenderTargetReleaser
                 {
                     ID2D1RenderTarget* rt;
@@ -589,22 +1097,68 @@ namespace puretype::hooks
                     hwndRT->Release();
                 }
 
-                const auto& cfg = Config::Instance().GetData(monitorName);
-                if (cfg.filterStrength <= 0.0f)
+                const ConfigData cfg = Config::Instance().GetData(monitorName);
+                ConfigData renderCfg = cfg;
+
+                auto forwardWithFallback = [&](const DrawGlyphRunPreflightState state,
+                                               const FallbackReason reason) -> HRESULT
                 {
+                    RecordFallback(state, reason);
+                    MaybeLogGuardrailCounters(renderCfg);
+                    return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
+                                               measuringMode, glyphRun, glyphRunDescription,
+                                               clientDrawingEffect);
+                };
+
+                if (renderCfg.colorGlyphBypassEnabled && IsColorGlyphRun(glyphRun))
+                {
+                    if (renderCfg.debugEnabled)
+                    {
+                        PureTypeLog("DWrite DrawGlyphRun: color glyph run bypassed to original renderer");
+                    }
+                    MaybeLogGuardrailCounters(renderCfg);
                     return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
                                                measuringMode, glyphRun, glyphRunDescription,
                                                clientDrawingEffect);
                 }
-                ConfigData renderCfg = cfg;
+
+                if (renderCfg.filterStrength <= 0.0f)
+                {
+                    return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                               FallbackReason::FilterDisabled);
+                }
+
+                // Optional fallback-reduction heuristics are gated by dwriteFallbackV2Enabled only.
+                // Atomic transactional safety remains always-on regardless of this toggle.
+                const bool fallbackHeuristicsEnabled = renderCfg.dwriteFallbackV2Enabled;
+
                 initColorMathLUTs(renderCfg.gammaMode == GammaMode::OLED);
 
                 std::string fontPath = GetFontPathFromFace(glyphRun->fontFace);
+                if (!fontPath.empty())
+                {
+                    if (fallbackHeuristicsEnabled)
+                    {
+                        CacheFontPathForFace(glyphRun->fontFace, fontPath);
+                    }
+                }
+                else if (fallbackHeuristicsEnabled)
+                {
+                    std::string cachedPath;
+                    if (TryGetCachedFontPathForFace(glyphRun->fontFace, &cachedPath))
+                    {
+                        fontPath = std::move(cachedPath);
+                        if (renderCfg.debugEnabled)
+                        {
+                            PureTypeLog("DWrite DrawGlyphRun: using cached font path fallback");
+                        }
+                    }
+                }
+
                 if (fontPath.empty())
                 {
-                    return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
-                                               measuringMode, glyphRun, glyphRunDescription,
-                                               clientDrawingEffect);
+                    return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                               FallbackReason::MissingFontPath);
                 }
 
                 // ── Inter font axis overrides ────────────────────────────────
@@ -648,9 +1202,8 @@ namespace puretype::hooks
                 float dpiScaleHint = 1.0f;
                 if (effectiveDpi >= renderCfg.highDpiThresholdHigh)
                 {
-                    return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
-                                               measuringMode, glyphRun, glyphRunDescription,
-                                               clientDrawingEffect);
+                    return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                               FallbackReason::FilterDisabled);
                 }
                 if (effectiveDpi > renderCfg.highDpiThresholdLow)
                 {
@@ -661,9 +1214,8 @@ namespace puretype::hooks
                     renderCfg.filterStrength *= dpiScaleHint;
                     if (renderCfg.filterStrength <= 0.0f)
                     {
-                        return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
-                                                   measuringMode, glyphRun, glyphRunDescription,
-                                                   clientDrawingEffect);
+                        return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                                   FallbackReason::FilterDisabled);
                     }
                 }
                 renderCfg.dpiScaleHint = dpiScaleHint;
@@ -674,9 +1226,8 @@ namespace puretype::hooks
                 const auto filter = SubpixelFilter::Create(static_cast<int>(renderCfg.panelType));
                 if (!filter)
                 {
-                    return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
-                                               measuringMode, glyphRun, glyphRunDescription,
-                                               clientDrawingEffect);
+                    return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                               FallbackReason::MissingFilter);
                 }
 
                 auto textColor = D2D1_COLOR_F{0.0f, 0.0f, 0.0f, 1.0f};
@@ -697,27 +1248,33 @@ namespace puretype::hooks
                                         textColor.r, textColor.g, textColor.b, textColor.a);
                         }
                     }
-                    else
+                    else if (renderCfg.debugEnabled)
                     {
-                        if (renderCfg.debugEnabled)
-                        {
-                            PureTypeLog("DWrite DrawGlyphRun: clientDrawingEffect present but NOT a SolidColorBrush");
-                        }
+                        PureTypeLog("DWrite DrawGlyphRun: clientDrawingEffect present but NOT a SolidColorBrush");
                     }
                 }
-                else
+                else if (renderCfg.debugEnabled)
                 {
+                    PureTypeLog("DWrite DrawGlyphRun: clientDrawingEffect is NULL");
+                }
+
+                if (hasReliableTextColor)
+                {
+                    CacheRecentTextColor(renderTarget, textColor);
+                }
+                else if (fallbackHeuristicsEnabled && TryGetRecentTextColor(renderTarget, &textColor))
+                {
+                    hasReliableTextColor = true;
                     if (renderCfg.debugEnabled)
                     {
-                        PureTypeLog("DWrite DrawGlyphRun: clientDrawingEffect is NULL");
+                        PureTypeLog("DWrite DrawGlyphRun: using cached text color fallback");
                     }
                 }
+
                 if (!hasReliableTextColor)
                 {
-                    // Without a reliable color source, avoid rendering with a wrong tint.
-                    return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
-                                               measuringMode, glyphRun, glyphRunDescription,
-                                               clientDrawingEffect);
+                    return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                               FallbackReason::MissingReliableTextColor);
                 }
 
                 // Contrast hint used by ToneMapper in the DWrite path.
@@ -740,7 +1297,11 @@ namespace puretype::hooks
                     RECT sampleRectPx = {};
                     if (ComputeGlyphRunSampleRectPx(*glyphRun, baselineOriginX, baselineOriginY,
                                                     rtTransform, rtDpiX, rtDpiY, &sampleRectPx) &&
-                        EstimateBackgroundLumaFromHwnd(targetHwnd, sampleRectPx, &sampledBgLuma))
+                        EstimateBackgroundLumaFromHwndInstrumented(
+                            targetHwnd,
+                            sampleRectPx,
+                            &sampledBgLuma,
+                            renderCfg.contrastSamplingCacheEnabled))
                     {
                         contrastHint = std::abs(linTextLuma - sampledBgLuma);
                         usedMeasuredContrast = true;
@@ -796,7 +1357,20 @@ namespace puretype::hooks
                     RGBABitmap bitmap;
                 };
                 std::vector<PendingGlyph> pending;
-                pending.reserve(glyphRun->glyphCount);
+                try
+                {
+                    pending.reserve(glyphRun->glyphCount);
+                }
+                catch (const std::bad_alloc&)
+                {
+                    return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                               FallbackReason::StagingAllocationFailed);
+                }
+                catch (...)
+                {
+                    return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                               FallbackReason::StagingAllocationFailed);
+                }
 
                 FLOAT penX = baselineOriginX;
                 for (UINT32 i = 0; i < glyphRun->glyphCount; ++i)
@@ -811,9 +1385,8 @@ namespace puretype::hooks
                         axisOverrides);
                     if (!glyph)
                     {
-                        return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
-                                                   measuringMode, glyphRun, glyphRunDescription,
-                                                   clientDrawingEffect);
+                        return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                                   FallbackReason::GlyphRasterizationFailed);
                     }
 
                     // Glyph positioning with padding-aware bearing.
@@ -846,12 +1419,25 @@ namespace puretype::hooks
                         continue;
                     }
 
-                    RGBABitmap filtered = filter->Apply(*glyph, renderCfg);
+                    RGBABitmap filtered;
+                    try
+                    {
+                        filtered = filter->Apply(*glyph, renderCfg);
+                    }
+                    catch (const std::bad_alloc&)
+                    {
+                        return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                                   FallbackReason::StagingAllocationFailed);
+                    }
+                    catch (...)
+                    {
+                        return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                                   FallbackReason::StagingAllocationFailed);
+                    }
                     if (filtered.data.empty())
                     {
-                        return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
-                                                   measuringMode, glyphRun, glyphRunDescription,
-                                                   clientDrawingEffect);
+                        return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                                   FallbackReason::FilterApplicationFailed);
                     }
 
                     if (renderCfg.highlightRenderedGlyphs)
@@ -869,54 +1455,237 @@ namespace puretype::hooks
                     pg.x = glyphX;
                     pg.y = glyphY;
                     pg.bitmap = std::move(filtered);
-                    pending.push_back(std::move(pg));
+                    try
+                    {
+                        pending.push_back(std::move(pg));
+                    }
+                    catch (const std::bad_alloc&)
+                    {
+                        return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                                   FallbackReason::StagingAllocationFailed);
+                    }
+                    catch (...)
+                    {
+                        return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                                   FallbackReason::StagingAllocationFailed);
+                    }
                 }
 
-                g_insideDWriteDrawGlyphRun = true;
-                bool allGlyphsBlitted = true;
+                if (pending.empty())
+                {
+                    return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                               FallbackReason::EmptyStagedRun);
+                }
+
+                // Always-on transactional policy:
+                // Stage full-run output first, then commit once to avoid segmented fallback.
+                int minLeftPx = std::numeric_limits<int>::max();
+                int minTopPx = std::numeric_limits<int>::max();
+                int maxRightPx = std::numeric_limits<int>::min();
+                int maxBottomPx = std::numeric_limits<int>::min();
 
                 for (const auto& item : pending)
                 {
-                    bool blitOk = Blender::Instance().BlitToD2DTarget(
-                        renderTarget, item.x, item.y, item.bitmap, textColor, renderCfg.gamma, pixelsPerDip);
-                    if (!blitOk)
-                    {
-                        allGlyphsBlitted = false;
-                        break;
-                    }
+                    const int glyphLeftPx = static_cast<int>(std::floor(item.x * pixelsPerDip));
+                    const int glyphTopPx = static_cast<int>(std::floor(item.y * pixelsPerDip));
+                    minLeftPx = std::min(minLeftPx, glyphLeftPx);
+                    minTopPx = std::min(minTopPx, glyphTopPx);
+                    maxRightPx = std::max(maxRightPx, glyphLeftPx + item.bitmap.width);
+                    maxBottomPx = std::max(maxBottomPx, glyphTopPx + item.bitmap.height);
                 }
 
-                g_insideDWriteDrawGlyphRun = false;
-
-                if (allGlyphsBlitted)
+                if (maxRightPx <= minLeftPx || maxBottomPx <= minTopPx)
                 {
-                    // D2D/DComp Shadow Buffer Fix:
-                    // Forward the call with a transparent brush to register bounding boxes
-                    // for dirty-rect invalidation without drawing stock ClearType.
-                    ID2D1SolidColorBrush* transparentBrush = nullptr;
-                    HRESULT hr = renderTarget->CreateSolidColorBrush(
-                        D2D1_COLOR_F{0.0f, 0.0f, 0.0f, 0.0f}, &transparentBrush);
-
-                    if (SUCCEEDED(hr) && transparentBrush)
-                    {
-                        ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
-                                            measuringMode, glyphRun, glyphRunDescription,
-                                            transparentBrush);
-                        transparentBrush->Release();
-                    }
-                    else
-                    {
-                        ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
-                                            measuringMode, glyphRun, glyphRunDescription,
-                                            clientDrawingEffect);
-                    }
-
-                    return S_OK;
+                    return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                               FallbackReason::EmptyStagedRun);
                 }
 
-                return ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
-                                           measuringMode, glyphRun, glyphRunDescription,
-                                           clientDrawingEffect);
+                const int64_t stagedWidth64 = static_cast<int64_t>(maxRightPx) -
+                    static_cast<int64_t>(minLeftPx);
+                const int64_t stagedHeight64 = static_cast<int64_t>(maxBottomPx) -
+                    static_cast<int64_t>(minTopPx);
+                constexpr int64_t kMaxStagedRunDimensionPx = 16384;
+                constexpr size_t kMaxStagedRunBytes = 256ull * 1024ull * 1024ull;
+
+                if (stagedWidth64 <= 0 || stagedHeight64 <= 0 ||
+                    stagedWidth64 > kMaxStagedRunDimensionPx ||
+                    stagedHeight64 > kMaxStagedRunDimensionPx)
+                {
+                    return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                               FallbackReason::StagingBoundsFailure);
+                }
+
+                const int64_t stagedPitch64 = stagedWidth64 * 4;
+                if (stagedPitch64 <= 0 ||
+                    stagedPitch64 > static_cast<int64_t>(std::numeric_limits<int>::max()))
+                {
+                    return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                               FallbackReason::StagingBoundsFailure);
+                }
+
+                const size_t stagedPitchSize = static_cast<size_t>(stagedPitch64);
+                const size_t stagedHeightSize = static_cast<size_t>(stagedHeight64);
+                if (stagedPitchSize > std::numeric_limits<size_t>::max() / stagedHeightSize)
+                {
+                    return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                               FallbackReason::StagingBoundsFailure);
+                }
+
+                const size_t stagedBytes = stagedPitchSize * stagedHeightSize;
+                if (stagedBytes == 0 || stagedBytes > kMaxStagedRunBytes)
+                {
+                    return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                               FallbackReason::StagingBoundsFailure);
+                }
+
+                RGBABitmap stagedRun;
+                stagedRun.width = static_cast<int>(stagedWidth64);
+                stagedRun.height = static_cast<int>(stagedHeight64);
+                stagedRun.pitch = static_cast<int>(stagedPitch64);
+                try
+                {
+                    stagedRun.data.assign(stagedBytes, 0);
+                }
+                catch (const std::bad_alloc&)
+                {
+                    return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                               FallbackReason::StagingAllocationFailed);
+                }
+                catch (...)
+                {
+                    return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                               FallbackReason::StagingAllocationFailed);
+                }
+
+                for (const auto& item : pending)
+                {
+                    if (item.bitmap.width <= 0 || item.bitmap.height <= 0 || item.bitmap.pitch <= 0)
+                    {
+                        return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                                   FallbackReason::StagingBoundsFailure);
+                    }
+
+                    const int64_t glyphRowBytes64 = static_cast<int64_t>(item.bitmap.width) * 4;
+                    if (glyphRowBytes64 <= 0 || glyphRowBytes64 > item.bitmap.pitch)
+                    {
+                        return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                                   FallbackReason::StagingBoundsFailure);
+                    }
+
+                    const size_t glyphPitchSize = static_cast<size_t>(item.bitmap.pitch);
+                    const size_t glyphHeightSize = static_cast<size_t>(item.bitmap.height);
+                    if (glyphPitchSize > std::numeric_limits<size_t>::max() / glyphHeightSize)
+                    {
+                        return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                                   FallbackReason::StagingBoundsFailure);
+                    }
+
+                    const size_t glyphExpectedBytes = glyphPitchSize * glyphHeightSize;
+                    if (glyphExpectedBytes > item.bitmap.data.size())
+                    {
+                        return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                                   FallbackReason::StagingBoundsFailure);
+                    }
+
+                    const int glyphLeftPx = static_cast<int>(std::floor(item.x * pixelsPerDip));
+                    const int glyphTopPx = static_cast<int>(std::floor(item.y * pixelsPerDip));
+                    const int dstX0 = glyphLeftPx - minLeftPx;
+                    const int dstY0 = glyphTopPx - minTopPx;
+
+                    for (int row = 0; row < item.bitmap.height; ++row)
+                    {
+                        const int dstRow = dstY0 + row;
+                        if (dstRow < 0 || dstRow >= stagedRun.height) continue;
+
+                        const size_t srcRowOffset = static_cast<size_t>(row) * glyphPitchSize;
+                        const uint8_t* srcRow = item.bitmap.data.data() + srcRowOffset;
+                        const size_t dstRowOffset =
+                            static_cast<size_t>(dstRow) * static_cast<size_t>(stagedRun.pitch);
+                        uint8_t* dstRowPtr = stagedRun.data.data() + dstRowOffset;
+
+                        for (int col = 0; col < item.bitmap.width; ++col)
+                        {
+                            const int dstCol = dstX0 + col;
+                            if (dstCol < 0 || dstCol >= stagedRun.width) continue;
+
+                            const uint8_t* srcPx = srcRow + col * 4;
+                            uint8_t* dstPx = dstRowPtr + dstCol * 4;
+
+                            dstPx[0] = std::max(dstPx[0], srcPx[0]);
+                            dstPx[1] = std::max(dstPx[1], srcPx[1]);
+                            dstPx[2] = std::max(dstPx[2], srcPx[2]);
+                            dstPx[3] = std::max(dstPx[3], srcPx[3]);
+                        }
+                    }
+                }
+
+                struct RunRenderTransaction
+                {
+                    bool preflightPassed = false;
+                    bool staged = false;
+                    bool committed = false;
+                } transaction;
+
+                transaction.preflightPassed = true;
+                transaction.staged = true;
+
+                // Preflight transparent brush before commit when feasible so post-commit behavior is deterministic.
+                ID2D1SolidColorBrush* transparentBrush = nullptr;
+                const HRESULT transparentBrushHr = renderTarget->CreateSolidColorBrush(
+                    D2D1_COLOR_F{0.0f, 0.0f, 0.0f, 0.0f}, &transparentBrush);
+
+                struct TransparentBrushReleaser
+                {
+                    ID2D1SolidColorBrush* brush;
+                    ~TransparentBrushReleaser() { if (brush) brush->Release(); }
+                } transparentBrushReleaser{transparentBrush};
+
+                const FLOAT runOriginX = static_cast<FLOAT>(minLeftPx) / pixelsPerDip;
+                const FLOAT runOriginY = static_cast<FLOAT>(minTopPx) / pixelsPerDip;
+
+                struct ScopedDrawGlyphRunFlag
+                {
+                    explicit ScopedDrawGlyphRunFlag(bool& inDrawFlag) : flag(inDrawFlag) { flag = true; }
+                    ~ScopedDrawGlyphRunFlag() { flag = false; }
+                    bool& flag;
+                } scopedFlag(g_insideDWriteDrawGlyphRun);
+
+                const bool runBlitOk = Blender::Instance().BlitToD2DTarget(
+                    renderTarget,
+                    runOriginX,
+                    runOriginY,
+                    stagedRun,
+                    textColor,
+                    renderCfg.gamma,
+                    renderCfg.oledGammaOutput,
+                    renderCfg.toneParityV2Enabled,
+                    pixelsPerDip);
+                if (!runBlitOk)
+                {
+                    return forwardWithFallback(DrawGlyphRunPreflightState::Fail,
+                                               FallbackReason::TransactionCommitFailed);
+                }
+
+                transaction.committed = true;
+
+                // D2D/DComp shadow buffer fix:
+                // Forward with a transparent brush to register dirty rects
+                // without drawing stock ClearType text over committed output.
+                if (SUCCEEDED(transparentBrushHr) && transparentBrush)
+                {
+                    ForwardDrawGlyphRun(clientDrawingContext, baselineOriginX, baselineOriginY,
+                                        measuringMode, glyphRun, glyphRunDescription,
+                                        transparentBrush);
+                }
+                else
+                {
+                    PureTypeLog(
+                        "DWrite DrawGlyphRun: committed run kept without original forward; transparent brush unavailable hr=0x%08lx",
+                        static_cast<unsigned long>(transparentBrushHr));
+                }
+
+                MaybeLogGuardrailCounters(renderCfg);
+                return S_OK;
             }
 
             // IDWriteTextRenderer1 extension for DComp and Modern UI caching
@@ -1287,7 +2056,7 @@ namespace puretype::hooks
         }
     }
 
-    bool InstallDWriteHooks()
+    bool InstallDWriteHooks(const bool primeExistingObjects)
     {
         HMODULE hDwrite = GetModuleHandleW(L"dwrite.dll");
         if (!hDwrite)
@@ -1316,7 +2085,7 @@ namespace puretype::hooks
             return false;
         }
 
-        if (!PrimeExistingDWriteObjects())
+        if (primeExistingObjects && !PrimeExistingDWriteObjects())
         {
             PureTypeLog("InstallDWriteHooks: initial DWrite object priming incomplete");
         }

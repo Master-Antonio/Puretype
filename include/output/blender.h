@@ -23,6 +23,8 @@ namespace puretype
                              const RGBABitmap& bitmap,
                              const D2D1_COLOR_F& textColor,
                              float gamma,
+                             float oledGammaOutput,
+                             bool toneParityV2Enabled,
                              float pixelsPerDip = 1.0f);
 
         static Blender& Instance();

@@ -1,9 +1,9 @@
-#pragma once
+﻿#pragma once
 
 #include <atomic>
 
 #define PURETYPE_VERSION_MAJOR 0
-#define PURETYPE_VERSION_MINOR 1
+#define PURETYPE_VERSION_MINOR 2
 #define PURETYPE_VERSION_PATCH 0
 
 #ifdef PURETYPE_EXPORTS

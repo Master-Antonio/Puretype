@@ -12,6 +12,7 @@
 #include <cstring>
 
 #include "color_math.h"
+#include "output/tone_parity.h"
 #include "render_optimizer.h"
 #include "stem_darkening.h"
 
@@ -327,8 +328,11 @@ namespace puretype::hooks
                             bool opaqueBackground, // ETO_OPAQUE was set (GDI filled background)
                             bool isComposited, // DC belongs to a composited/layered window
                             float dpiScale = 1.0f, // 1.0 = full effect, 0.0 = skip (DPI fade)
-                            uint16_t fontWeight = 400) // LOGFONT::lfWeight
+                            uint16_t fontWeight = 400, // LOGFONT::lfWeight
+                            float emSizePx = 0.0f) // font metric size hint (pixels)
     {
+        (void)isComposited;
+
         if (!before.IsValid() || !after.IsValid()) return;
         if (before.width != after.width || before.height != after.height) return;
 
@@ -352,8 +356,9 @@ namespace puretype::hooks
         const bool rgwbPanel = (cfg.panelType == PanelType::RGWB);
         const EdgeAdaptiveParams edgeParams = GetEdgeAdaptiveParams(qdPanel);
 
-        // Stem darkening — matches FreeType path (subpixel_filter.cpp)
-        const float emSize = static_cast<float>(h);
+        // Stem darkening — align em-size source with FreeType path.
+        // Prefer font metric size if available, then fall back to capture height.
+        const float emSize = (emSizePx > 0.0f) ? emSizePx : static_cast<float>(h);
         const float darkenAmount = cfg.stemDarkeningEnabled
                                        ? computeDarkenAmount(emSize, cfg.stemDarkeningStrength, fontWeight)
                                        : 0.0f;
@@ -393,6 +398,9 @@ namespace puretype::hooks
         else if (h <= 32) chromaKeepBase = qdPanel ? 0.86f : 0.84f;
         else chromaKeepBase = qdPanel ? 0.88f : 0.87f;
 
+        const float chromaFamilyScale = qdPanel ? cfg.chromaKeepScaleQD : cfg.chromaKeepScaleWOLED;
+        chromaKeepBase *= std::clamp(chromaFamilyScale, 0.60f, 1.30f);
+
         // Font-weight aware adjustment: thin fonts are more sensitive to fringing.
         if (fontWeight > 0)
         {
@@ -417,19 +425,10 @@ namespace puretype::hooks
         //   alpha = 0   → AlphaBlend skips this pixel (compositor content intact)
         //   alpha = 255 → pixel is replaced with our value
         //
-        // Three categories of changed pixels:
-        //   A) before == after: nothing changed → keep alpha=0, skip
-        //      Exception: ETO_OPAQUE background fill on non-composited DC → write ap, alpha=255
-        //
-        //   B) before != after, masks all ≈ 0: mask extraction failed.
-        //      This happens when:
-        //        - GetTextColor() returns wrong color (e.g., some dialog controls)
-        //        - ETO_OPAQUE fill went in the opposite direction from textColor
-        //          (old text area overwritten with background fill — "ghost chars" in Notepad)
-        //      Fix: write GDI output (ap) directly on non-composited DCs.
-        //      On composited DCs keep alpha=0 — writing ap could overwrite compositor content.
-        //
-        //   C) before != after, masks > threshold: normal text pixel → OLED remap, alpha=255
+        // Background safety policy:
+        //   - unchanged or non-text changed pixels are always skipped (alpha=0)
+        //   - only detected text-edge pixels receive OLED remap (alpha=255)
+        // This keeps opaque/background fills from being recolored by PureType.
         std::vector<uint8_t> output(static_cast<size_t>(before.pitch) * h, 0);
         bool anyModified = false;
 
@@ -446,13 +445,21 @@ namespace puretype::hooks
         //   Pass 3: OLED remap + chromaKeep + S-curve + blend using smoothed masks.
         //
         // Pixel category flags stored in rowFlags[]:
-        //   0 = Category A (unchanged) — already handled in Pass 1.
-        //   1 = Category B (mask ≈ 0, changed) — GDI passthrough, handled in Pass 1.
+        //   0 = Category A (unchanged) — skip.
+        //   1 = Non-text changed pixel — skip (destination keeps original GDI output).
         //   2 = Category C (valid text pixel) — processed in Pass 3.
         std::vector<float> rowMaskR(w), rowMaskG(w), rowMaskB(w);
         std::vector<float> rowSmR(w), rowSmG(w), rowSmB(w);
         std::vector<float> rowBgR(w), rowBgG(w), rowBgB(w);
-        std::vector<uint8_t> rowFlags(w); // 0=skip, 1=passthrough, 2=text
+        std::vector<uint8_t> rowFlags(w); // 0=skip, 1=changed-but-skip, 2=text
+
+        constexpr int kOpaqueEdgeScoreMin = 24;
+        const auto colorDeltaScore = [](const uint8_t* p0, const uint8_t* p1) -> int
+        {
+            return std::abs(static_cast<int>(p0[0]) - static_cast<int>(p1[0]))
+                + std::abs(static_cast<int>(p0[1]) - static_cast<int>(p1[1]))
+                + std::abs(static_cast<int>(p0[2]) - static_cast<int>(p1[2]));
+        };
 
         // Previous-row smoothed masks for QD-OLED vertical blending (#6).
         // QD-OLED triangular layouts have even/odd rows offset by ~1.5 subpixels.
@@ -475,6 +482,8 @@ namespace puretype::hooks
         {
             const uint8_t* bRow = before.data.data() + row * before.pitch;
             const uint8_t* aRow = after.data.data() + row * after.pitch;
+            const uint8_t* aRowPrev = row > 0 ? after.data.data() + (row - 1) * after.pitch : nullptr;
+            const uint8_t* aRowNext = row + 1 < h ? after.data.data() + (row + 1) * after.pitch : nullptr;
             uint8_t* oRow = output.data() + row * before.pitch;
 
             // -----------------------------------------------------------------
@@ -490,20 +499,8 @@ namespace puretype::hooks
                 {
                     rowFlags[col] = 0;
                     rowMaskR[col] = rowMaskG[col] = rowMaskB[col] = 0.0f;
-
-                    if (opaqueBackground && !isComposited)
-                    {
-                        oRow[col * 4 + 0] = ap[0];
-                        oRow[col * 4 + 1] = ap[1];
-                        oRow[col * 4 + 2] = ap[2];
-                        oRow[col * 4 + 3] = 0xFF;
-                        anyModified = true;
-                    }
                     continue;
                 }
-
-                // Pixel changed.
-                anyModified = true;
 
                 // Linearise background for the final blend (Pass 3).
                 rowBgB[col] = sRGBToLinear(bp[0]);
@@ -525,17 +522,40 @@ namespace puretype::hooks
                 const float totalMask = std::max({mR, mG, mB});
                 if (totalMask < 0.02f)
                 {
-                    // Category B: mask extraction failed.
+                    // Category B: mask extraction failed or non-text pixel.
                     rowFlags[col] = 1;
                     rowMaskR[col] = rowMaskG[col] = rowMaskB[col] = 0.0f;
-                    if (!isComposited)
-                    {
-                        oRow[col * 4 + 0] = ap[0];
-                        oRow[col * 4 + 1] = ap[1];
-                        oRow[col * 4 + 2] = ap[2];
-                        oRow[col * 4 + 3] = 0xFF;
-                    }
                     continue;
+                }
+
+                if (opaqueBackground)
+                {
+                    // Opaque draws can include large uniform fills in the same call.
+                    // Only treat edge-like pixels as text; keep flat fill areas untouched.
+                    int edgeScore = 0;
+                    if (col > 0)
+                    {
+                        edgeScore = std::max(edgeScore, colorDeltaScore(ap, aRow + (col - 1) * 4));
+                    }
+                    if (col + 1 < w)
+                    {
+                        edgeScore = std::max(edgeScore, colorDeltaScore(ap, aRow + (col + 1) * 4));
+                    }
+                    if (aRowPrev)
+                    {
+                        edgeScore = std::max(edgeScore, colorDeltaScore(ap, aRowPrev + col * 4));
+                    }
+                    if (aRowNext)
+                    {
+                        edgeScore = std::max(edgeScore, colorDeltaScore(ap, aRowNext + col * 4));
+                    }
+
+                    if (edgeScore < kOpaqueEdgeScoreMin)
+                    {
+                        rowFlags[col] = 1;
+                        rowMaskR[col] = rowMaskG[col] = rowMaskB[col] = 0.0f;
+                        continue;
+                    }
                 }
 
                 // Category C: valid text pixel.
@@ -647,8 +667,9 @@ namespace puretype::hooks
                     // Accurate subpixel positioning requires centering the masks
                     // around the actual physical subpixel barycenters.
                     float expectedSep = -0.667f; // Default RGB stripe
-                    if (qdGen3 || qdGen4) expectedSep = -0.500f; // R=0.25, B=0.75
-                    else if (qdGen1) expectedSep = -0.440f; // R=0.28, B=0.72
+                    if (qdGen1) expectedSep = cfg.qdExpectedSepGen1;
+                    else if (qdGen3) expectedSep = cfg.qdExpectedSepGen3;
+                    else if (qdGen4) expectedSep = cfg.qdExpectedSepGen4;
 
                     // Actual separation tells us the phase error.
                     const float actualSep = centR - centB;
@@ -691,8 +712,9 @@ namespace puretype::hooks
             if (qdPanel && hasPrevRow)
             {
                 const int shift = (row % 2 == 0) ? 1 : -1;
-                // Vertical blend modulated by filterStrength — matches DWrite path.
-                const float kVertBlend = 0.10f * std::min(toneStrength, 1.0f);
+                // Vertical blend modulated by filterStrength — aligned with DWrite path.
+                const float qdBlendBase = std::clamp(cfg.qdVerticalBlend, 0.0f, 0.30f);
+                const float kVertBlend = qdBlendBase * std::min(toneStrength, 1.0f);
 
                 for (int col = 0; col < w; ++col)
                 {
@@ -924,40 +946,31 @@ namespace puretype::hooks
                 float outG = bgG_lin * (1.0f - finalCovG) + linTextG * finalCovG;
                 float outB = bgB_lin * (1.0f - finalCovB) + linTextB * finalCovB;
 
-                // --- OLED display gamma compensation (post-compositing) ---
-                // Applied to the composited pixel, not the coverage mask.
-                // Compensates for OLED's electroluminescent response: on
-                // self-emissive displays, mid-tone text can appear lighter
-                // than on LCDs (no backlight bleed to anchor black). This
-                // correction operates on the actual pixel intensity that
-                // the display will emit, which is the physically correct
-                // domain for gamma compensation.
-                //
-                // cfg.gamma > 1.0 darkens the composited text pixel to
-                // compensate for OLED's brighter mid-tone perception.
-                // Formula: apply pow(pixel, gamma/sRGB_gamma) to the text
-                // contribution only, preserving the background.
-                if (cfg.gamma > 1.001f)
+                const float covMax = std::max({finalCovR, finalCovG, finalCovB});
+                if (cfg.toneParityV2Enabled)
+                {
+                    const float postGamma = ComputeToneParityPostGamma(cfg.gamma, cfg.oledGammaOutput);
+                    ApplyToneParityPostComposite(outR, outG, outB,
+                                                 bgR_lin, bgG_lin, bgB_lin,
+                                                 covMax,
+                                                 postGamma);
+                }
+                else if (cfg.gamma > 1.001f && covMax > 0.01f)
                 {
                     const float gammaCorr = cfg.gamma;
-                    // Isolate text contribution and apply gamma.
-                    // Guard: only modify pixels where coverage is non-trivial.
-                    const float covMax = std::max({finalCovR, finalCovG, finalCovB});
-                    if (covMax > 0.01f)
-                    {
-                        outR = bgR_lin + (outR - bgR_lin) * std::pow(covMax, gammaCorr - 1.0f);
-                        outG = bgG_lin + (outG - bgG_lin) * std::pow(covMax, gammaCorr - 1.0f);
-                        outB = bgB_lin + (outB - bgB_lin) * std::pow(covMax, gammaCorr - 1.0f);
-                        outR = std::clamp(outR, 0.0f, 1.0f);
-                        outG = std::clamp(outG, 0.0f, 1.0f);
-                        outB = std::clamp(outB, 0.0f, 1.0f);
-                    }
+                    outR = bgR_lin + (outR - bgR_lin) * std::pow(covMax, gammaCorr - 1.0f);
+                    outG = bgG_lin + (outG - bgG_lin) * std::pow(covMax, gammaCorr - 1.0f);
+                    outB = bgB_lin + (outB - bgB_lin) * std::pow(covMax, gammaCorr - 1.0f);
+                    outR = std::clamp(outR, 0.0f, 1.0f);
+                    outG = std::clamp(outG, 0.0f, 1.0f);
+                    outB = std::clamp(outB, 0.0f, 1.0f);
                 }
 
                 oRow[col * 4 + 0] = linearToSRGB(outB);
                 oRow[col * 4 + 1] = linearToSRGB(outG);
                 oRow[col * 4 + 2] = linearToSRGB(outR);
                 oRow[col * 4 + 3] = 0xFF;
+                anyModified = true;
             }
 
             // Save smoothed masks for vertical QD-OLED blending (#6) in next row.
@@ -1051,7 +1064,7 @@ namespace puretype::hooks
             }
         }
 
-        const auto& cfg = Config::Instance().GetData(monitorName);
+        const auto cfg = Config::Instance().GetData(monitorName);
         if (cfg.filterStrength <= 0.0f)
             return g_OrigExtTextOutW(hdc, x, y, options, lprc, lpString, cbCount, lpDx);
         initColorMathLUTs(cfg.gammaMode == GammaMode::OLED);
@@ -1150,21 +1163,30 @@ namespace puretype::hooks
 
                 const bool opaqueBackground = (options & ETO_OPAQUE) && (lprc != nullptr);
 
-                // Extract font weight for stem darkening adaptation.
+                // Extract font metrics for stem darkening adaptation.
                 uint16_t fontWeight = 400;
+                float emSizePx = static_cast<float>(captureH);
                 {
                     HFONT hFont = static_cast<HFONT>(GetCurrentObject(hdc, OBJ_FONT));
                     if (hFont)
                     {
                         LOGFONTW lf = {};
                         if (GetObjectW(hFont, sizeof(lf), &lf))
+                        {
                             fontWeight = static_cast<uint16_t>(
                                 std::clamp(static_cast<int>(lf.lfWeight), 100, 900));
+                        }
+
+                        TEXTMETRICW tm = {};
+                        if (GetTextMetricsW(hdc, &tm) && tm.tmHeight > 0)
+                        {
+                            emSizePx = static_cast<float>(tm.tmHeight);
+                        }
                     }
                 }
 
                 RemapToOLED(hdc, before, after, textColor, cfg,
-                            opaqueBackground, isComposited, dpiScale, fontWeight);
+                            opaqueBackground, isComposited, dpiScale, fontWeight, emSizePx);
             }
 
             g_insideHook = false;
@@ -1211,11 +1233,12 @@ namespace puretype::hooks
         {
             if (auto p = reinterpret_cast<ExtTextOutW_t>(GetProcAddress(hGdi32, "ExtTextOutW")))
             {
-                if (MH_CreateHook(reinterpret_cast<LPVOID>(p),
-                                  reinterpret_cast<LPVOID>(&Hooked_ExtTextOutW),
-                                  reinterpret_cast<LPVOID*>(&g_OrigExtTextOutW)) != MH_OK)
+                const MH_STATUS status = MH_CreateHook(reinterpret_cast<LPVOID>(p),
+                                                       reinterpret_cast<LPVOID>(&Hooked_ExtTextOutW),
+                                                       reinterpret_cast<LPVOID*>(&g_OrigExtTextOutW));
+                if (status != MH_OK)
                 {
-                    PureTypeLog("MH_CreateHook(ExtTextOutW) failed");
+                    PureTypeLog("MH_CreateHook(ExtTextOutW) failed: %s", MH_StatusToString(status));
                     success = false;
                 }
             }
@@ -1227,10 +1250,25 @@ namespace puretype::hooks
 
             if (auto p = reinterpret_cast<PolyTextOutW_t>(GetProcAddress(hGdi32, "PolyTextOutW")))
             {
-                MH_CreateHook(reinterpret_cast<LPVOID>(p),
-                              reinterpret_cast<LPVOID>(&Hooked_PolyTextOutW),
-                              reinterpret_cast<LPVOID*>(&g_OrigPolyTextOutW));
+                const MH_STATUS status = MH_CreateHook(reinterpret_cast<LPVOID>(p),
+                                                       reinterpret_cast<LPVOID>(&Hooked_PolyTextOutW),
+                                                       reinterpret_cast<LPVOID*>(&g_OrigPolyTextOutW));
+                if (status != MH_OK)
+                {
+                    PureTypeLog("MH_CreateHook(PolyTextOutW) failed: %s", MH_StatusToString(status));
+                    success = false;
+                }
             }
+            else
+            {
+                PureTypeLog("PolyTextOutW not found");
+                success = false;
+            }
+        }
+        else
+        {
+            PureTypeLog("gdi32.dll not available");
+            success = false;
         }
 
         HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
@@ -1238,14 +1276,43 @@ namespace puretype::hooks
         if (hUser32)
         {
             if (auto p = reinterpret_cast<DrawTextW_t>(GetProcAddress(hUser32, "DrawTextW")))
-                MH_CreateHook(reinterpret_cast<LPVOID>(p),
-                              reinterpret_cast<LPVOID>(&Hooked_DrawTextW),
-                              reinterpret_cast<LPVOID*>(&g_OrigDrawTextW));
+            {
+                const MH_STATUS status = MH_CreateHook(reinterpret_cast<LPVOID>(p),
+                                                       reinterpret_cast<LPVOID>(&Hooked_DrawTextW),
+                                                       reinterpret_cast<LPVOID*>(&g_OrigDrawTextW));
+                if (status != MH_OK)
+                {
+                    PureTypeLog("MH_CreateHook(DrawTextW) failed: %s", MH_StatusToString(status));
+                    success = false;
+                }
+            }
+            else
+            {
+                PureTypeLog("DrawTextW not found");
+                success = false;
+            }
 
             if (auto p = reinterpret_cast<DrawTextExW_t>(GetProcAddress(hUser32, "DrawTextExW")))
-                MH_CreateHook(reinterpret_cast<LPVOID>(p),
-                              reinterpret_cast<LPVOID>(&Hooked_DrawTextExW),
-                              reinterpret_cast<LPVOID*>(&g_OrigDrawTextExW));
+            {
+                const MH_STATUS status = MH_CreateHook(reinterpret_cast<LPVOID>(p),
+                                                       reinterpret_cast<LPVOID>(&Hooked_DrawTextExW),
+                                                       reinterpret_cast<LPVOID*>(&g_OrigDrawTextExW));
+                if (status != MH_OK)
+                {
+                    PureTypeLog("MH_CreateHook(DrawTextExW) failed: %s", MH_StatusToString(status));
+                    success = false;
+                }
+            }
+            else
+            {
+                PureTypeLog("DrawTextExW not found");
+                success = false;
+            }
+        }
+        else
+        {
+            PureTypeLog("user32.dll not available");
+            success = false;
         }
 
         return success;

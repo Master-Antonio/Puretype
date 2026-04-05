@@ -6,12 +6,15 @@ using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using Microsoft.Win32;
+using PuretypeUI.Services;
 
 namespace PuretypeUI
 {
@@ -44,10 +47,42 @@ namespace PuretypeUI
             int height,
             IntPtr pBuffer);
 
+        [StructLayout(LayoutKind.Sequential)]
+        private struct PreviewParamsV2
+        {
+            public uint size;
+            public uint version;
+            public IntPtr text;
+            public IntPtr fontPath;
+            public uint fontSize;
+            public float filterStrength;
+            public float gamma;
+            public int gammaMode;
+            public float oledGammaOutput;
+            public float lumaContrastStrength;
+            public float woledCrossTalkReduction;
+            public uint enableSubpixelHinting;
+            public uint enableFractionalPositioning;
+            public uint stemDarkeningEnabled;
+            public float stemDarkeningStrength;
+            public int panelType;
+            public uint useMeasuredContrast;
+            public int width;
+            public int height;
+            public IntPtr pBuffer;
+            public float lodThresholdSmall;
+            public float lodThresholdLarge;
+            public uint toneParityV2Enabled;
+        }
+
+        [DllImport("PureType.dll", CallingConvention = CallingConvention.Cdecl, CharSet = CharSet.Ansi, EntryPoint = "GeneratePreviewV2")]
+        private static extern bool GeneratePreviewV2(ref PreviewParamsV2 parameters, uint paramsSize);
+
         [DllImport("user32.dll")]
         private static extern bool EnumDisplayDevices(string? lpDevice, uint iDevNum, ref DISPLAY_DEVICE lpDisplayDevice, uint dwFlags);
 
         private const uint WM_PURETYPE_RELOAD = 0x8002u;
+        private const uint PreviewParamsV2Version = 1u;
         private const int PreviewRenderWidth = 600;
         private const int PreviewRenderHeight = 200;
 
@@ -56,11 +91,18 @@ namespace PuretypeUI
         private bool _dllAvailable = true;
         private string _iniPath = "puretype.ini";
         private List<string> _iniLines = new();
+        private bool? _previewV2Available;
+        private bool _toneParityV2Enabled;
         private bool _isUpdatingContext;
         private readonly List<string> _allAppNames = new();
         private StackPanel[] _pages = Array.Empty<StackPanel>();
         private string _editingProfileSection = string.Empty;
         private string? _activeQuickPreset;
+
+        private readonly GitHubUpdateService _updateService = new();
+        private UpdateInfo? _latestUpdate;
+        private CancellationTokenSource? _updateCts;
+        private string? _updateStagingDir;
 
         private static readonly string FontPath = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.Fonts),
@@ -137,6 +179,7 @@ namespace PuretypeUI
                     PageDisplay,
                     PageSystemFont,
                     PageProfiles,
+                    PageAdvanced,
                     PageSettings,
                     PageInfo
                 };
@@ -153,6 +196,12 @@ namespace PuretypeUI
                 UpdateInterPreview();
                 UpdateInterHints();
                 UpdatePreview();
+
+                // Auto-check for updates if enabled
+                if (AutoCheckUpdatesCheck.IsChecked == true)
+                {
+                    _ = CheckForUpdatesInternalAsync(silent: true);
+                }
             }
             catch (Exception ex)
             {
@@ -180,6 +229,7 @@ namespace PuretypeUI
             else if (TabDisplay.IsChecked == true) ShowPage(PageDisplay);
             else if (TabSystemFont.IsChecked == true) ShowPage(PageSystemFont);
             else if (TabProfiles.IsChecked == true) ShowPage(PageProfiles);
+            else if (TabAdvanced.IsChecked == true) ShowPage(PageAdvanced);
             else if (TabSettings.IsChecked == true) ShowPage(PageSettings);
             else if (TabInfo.IsChecked == true) ShowPage(PageInfo);
         }
@@ -414,27 +464,36 @@ namespace PuretypeUI
             if (gammaMode == "standard") gammaMode = "srgb";
             SelectComboByTag(GammaModeCombo, gammaMode);
 
-            FilterStrengthSlider.Value = Math.Clamp(GetFloat(map, "filterstrength", 1.0f), 0.0, 2.0);
-            GammaSlider.Value = Math.Clamp(GetFloat(map, "gamma", 1.0f), 0.5, 2.5);
+            FilterStrengthSlider.Value = Math.Clamp(GetFloat(map, "filterstrength", 1.0f), 0.0, 5.0);
+            GammaSlider.Value = Math.Clamp(GetFloat(map, "gamma", 1.0f), 0.5, 3.0);
             OledGammaOutputSlider.Value = Math.Clamp(GetFloat(map, "oledgammaoutput", 1.0f), 1.0, 2.0);
-            LumaContrastSlider.Value = Math.Clamp(GetFloat(map, "lumacontraststrength", 1.20f), 0.5, 2.0);
-            WoledCrosstalkSlider.Value = Math.Clamp(GetFloat(map, "woledcrosstalkreduction", 0.08f), 0.0, 0.5);
+            LumaContrastSlider.Value = Math.Clamp(GetFloat(map, "lumacontraststrength", 1.20f), 1.0, 3.0);
+            WoledCrosstalkSlider.Value = Math.Clamp(GetFloat(map, "woledcrosstalkreduction", 0.08f), 0.0, 1.0);
+            QdSepGen1Slider.Value = Math.Clamp(GetFloat(map, "qdexpectedsepgen1", -0.44f), -1.0, -0.1);
+            QdSepGen3Slider.Value = Math.Clamp(GetFloat(map, "qdexpectedsepgen3", -0.50f), -1.0, -0.1);
+            QdSepGen4Slider.Value = Math.Clamp(GetFloat(map, "qdexpectedsepgen4", -0.50f), -1.0, -0.1);
+            QdVerticalBlendSlider.Value = Math.Clamp(GetFloat(map, "qdverticalblend", 0.15f), 0.0, 0.30);
+            ChromaKeepQdSlider.Value = Math.Clamp(GetFloat(map, "chromakeepscaleqd", 1.00f), 0.60, 1.30);
+            ChromaKeepWoledSlider.Value = Math.Clamp(GetFloat(map, "chromakeepscalewoled", 1.00f), 0.60, 1.30);
             SubpixelHintingCheck.IsChecked = GetBool(map, "enablesubpixelhinting", true);
             FractionalPositioningCheck.IsChecked = GetBool(map, "enablefractionalpositioning", false);
             StemDarkeningCheck.IsChecked = GetBool(map, "stemdarkeningenabled", true);
-            StemStrengthSlider.Value = Math.Clamp(GetFloat(map, "stemdarkeningstrength", 0.45f), 0.0, 1.0);
+            StemStrengthSlider.Value = Math.Clamp(GetFloat(map, "stemdarkeningstrength", 0.45f), 0.0, 2.0);
+            _toneParityV2Enabled = GetBool(map, "toneparityv2enabled", false);
 
-            LodSmallSlider.Value = Math.Clamp(GetFloat(map, "lodthresholdsmall", 10.0f), 0.0, 50.0);
+            LodSmallSlider.Value = Math.Clamp(GetFloat(map, "lodthresholdsmall", 10.0f), 6.0, 96.0);
             LodLargeSlider.Minimum = LodSmallSlider.Value + 1.0;
-            LodLargeSlider.Value = Math.Max(Math.Clamp(GetFloat(map, "lodthresholdlarge", 22.0f), 0.0, 100.0), LodLargeSlider.Minimum);
+            LodLargeSlider.Value = Math.Max(Math.Clamp(GetFloat(map, "lodthresholdlarge", 22.0f), 7.0, 160.0), LodLargeSlider.Minimum);
 
-            HighDpiLowSlider.Value = Math.Clamp(GetFloat(map, "highdpithresholdlow", 144.0f), 96.0, 300.0);
+            HighDpiLowSlider.Value = Math.Clamp(GetFloat(map, "highdpithresholdlow", 144.0f), 96.0, 384.0);
             HighDpiHighSlider.Minimum = HighDpiLowSlider.Value + 1.0;
             HighDpiHighSlider.Value = Math.Max(Math.Clamp(GetFloat(map, "highdpithresholdhigh", 216.0f), 96.0, 600.0), HighDpiHighSlider.Minimum);
 
             DebugEnabledCheck.IsChecked = ParseBoolValue(map.GetValueOrDefault("debug.enabled"), false);
             LogFileText.Text = map.GetValueOrDefault("debug.logfile") ?? "PURETYPE.log";
             HighlightGlyphsCheck.IsChecked = ParseBoolValue(map.GetValueOrDefault("debug.highlightrenderedglyphs"), false);
+
+            AutoCheckUpdatesCheck.IsChecked = GetBool(map, "autocheckupdates", true);
 
             using (RegistryKey? runKey = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Run", false))
             {
@@ -514,6 +573,12 @@ namespace PuretypeUI
             LumaValText.Text = F2(LumaContrastSlider.Value);
             WoledValText.Text = F2(WoledCrosstalkSlider.Value);
             StemStrValText.Text = F2(StemStrengthSlider.Value);
+            QdSepGen1ValText.Text = F2(QdSepGen1Slider.Value);
+            QdSepGen3ValText.Text = F2(QdSepGen3Slider.Value);
+            QdSepGen4ValText.Text = F2(QdSepGen4Slider.Value);
+            QdVerticalBlendValText.Text = F2(QdVerticalBlendSlider.Value);
+            ChromaKeepQdValText.Text = F2(ChromaKeepQdSlider.Value);
+            ChromaKeepWoledValText.Text = F2(ChromaKeepWoledSlider.Value);
             UpdateSummary();
         }
 
@@ -627,6 +692,12 @@ namespace PuretypeUI
             SetIniValue("general", "enableSubpixelHinting", Bool(SubpixelHintingCheck.IsChecked == true));
             SetIniValue("general", "enableFractionalPositioning", Bool(FractionalPositioningCheck.IsChecked == true));
             SetIniValue("general", "lumaContrastStrength", F2(LumaContrastSlider.Value));
+            SetIniValue("general", "qdExpectedSepGen1", F2(QdSepGen1Slider.Value));
+            SetIniValue("general", "qdExpectedSepGen3", F2(QdSepGen3Slider.Value));
+            SetIniValue("general", "qdExpectedSepGen4", F2(QdSepGen4Slider.Value));
+            SetIniValue("general", "qdVerticalBlend", F2(QdVerticalBlendSlider.Value));
+            SetIniValue("general", "chromaKeepScaleQD", F2(ChromaKeepQdSlider.Value));
+            SetIniValue("general", "chromaKeepScaleWOLED", F2(ChromaKeepWoledSlider.Value));
             SetIniValue("general", "stemDarkeningEnabled", Bool(StemDarkeningCheck.IsChecked == true));
             SetIniValue("general", "stemDarkeningStrength", F2(StemStrengthSlider.Value));
             SetIniValue("general", "woledCrossTalkReduction", F2(WoledCrosstalkSlider.Value));
@@ -638,6 +709,7 @@ namespace PuretypeUI
             SetIniValue("general", "interOpticalSize", ((int)InterOpszSlider.Value).ToString(CultureInfo.InvariantCulture));
             SetIniValue("general", "interLetterSpacing", F1(InterTrackingSlider.Value));
             SetIniValue("general", "blacklist", string.Join(", ", BlacklistText.Text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)));
+            SetIniValue("general", "autoCheckUpdates", Bool(AutoCheckUpdatesCheck.IsChecked == true));
 
             SetIniValue("debug", "enabled", Bool(DebugEnabledCheck.IsChecked == true));
             SetIniValue("debug", "logFile", string.IsNullOrWhiteSpace(LogFileText.Text) ? "PURETYPE.log" : LogFileText.Text.Trim());
@@ -689,25 +761,104 @@ namespace PuretypeUI
                 int gammaMode = (GammaModeCombo.SelectedItem as ComboBoxItem)?.Tag?.ToString() == "oled" ? 1 : 0;
                 const string sample = "The quick brown fox jumps over the lazy dog. Lorem ipsum dolor sit amet, consectetur adipiscing elit.";
 
-                bool ok = GeneratePreview(
-                    sample,
-                    FontPath,
-                    24,
-                    (float)FilterStrengthSlider.Value,
-                    (float)GammaSlider.Value,
-                    gammaMode,
-                    (float)OledGammaOutputSlider.Value,
-                    (float)LumaContrastSlider.Value,
-                    (float)WoledCrosstalkSlider.Value,
-                    SubpixelHintingCheck.IsChecked == true,
-                    FractionalPositioningCheck.IsChecked == true,
-                    StemDarkeningCheck.IsChecked == true,
-                    (float)StemStrengthSlider.Value,
-                    panelType,
-                    true,
-                    PreviewRenderWidth,
-                    PreviewRenderHeight,
-                    _previewBuffer);
+                bool ok;
+                IntPtr sampleAnsi = IntPtr.Zero;
+                IntPtr fontPathAnsi = IntPtr.Zero;
+
+                bool GeneratePreviewV1Fallback()
+                {
+                    return GeneratePreview(
+                        sample,
+                        FontPath,
+                        24,
+                        (float)FilterStrengthSlider.Value,
+                        (float)GammaSlider.Value,
+                        gammaMode,
+                        (float)OledGammaOutputSlider.Value,
+                        (float)LumaContrastSlider.Value,
+                        (float)WoledCrosstalkSlider.Value,
+                        SubpixelHintingCheck.IsChecked == true,
+                        FractionalPositioningCheck.IsChecked == true,
+                        StemDarkeningCheck.IsChecked == true,
+                        (float)StemStrengthSlider.Value,
+                        panelType,
+                        true,
+                        PreviewRenderWidth,
+                        PreviewRenderHeight,
+                        _previewBuffer);
+                }
+
+                try
+                {
+                    if (_previewV2Available != false)
+                    {
+                        sampleAnsi = Marshal.StringToHGlobalAnsi(sample);
+                        fontPathAnsi = Marshal.StringToHGlobalAnsi(FontPath);
+
+                        PreviewParamsV2 previewParams = new()
+                        {
+                            size = (uint)Marshal.SizeOf<PreviewParamsV2>(),
+                            version = PreviewParamsV2Version,
+                            text = sampleAnsi,
+                            fontPath = fontPathAnsi,
+                            fontSize = 24,
+                            filterStrength = (float)FilterStrengthSlider.Value,
+                            gamma = (float)GammaSlider.Value,
+                            gammaMode = gammaMode,
+                            oledGammaOutput = (float)OledGammaOutputSlider.Value,
+                            lumaContrastStrength = (float)LumaContrastSlider.Value,
+                            woledCrossTalkReduction = (float)WoledCrosstalkSlider.Value,
+                            enableSubpixelHinting = SubpixelHintingCheck.IsChecked == true ? 1u : 0u,
+                            enableFractionalPositioning = FractionalPositioningCheck.IsChecked == true ? 1u : 0u,
+                            stemDarkeningEnabled = StemDarkeningCheck.IsChecked == true ? 1u : 0u,
+                            stemDarkeningStrength = (float)StemStrengthSlider.Value,
+                            panelType = panelType,
+                            useMeasuredContrast = 1u,
+                            width = PreviewRenderWidth,
+                            height = PreviewRenderHeight,
+                            pBuffer = _previewBuffer,
+                            lodThresholdSmall = (float)LodSmallSlider.Value,
+                            lodThresholdLarge = (float)LodLargeSlider.Value,
+                            toneParityV2Enabled = _toneParityV2Enabled ? 1u : 0u
+                        };
+
+                        try
+                        {
+                            bool v2Ok = GeneratePreviewV2(ref previewParams, previewParams.size);
+                            if (v2Ok)
+                            {
+                                _previewV2Available = true;
+                                ok = true;
+                            }
+                            else
+                            {
+                                _previewV2Available = false;
+                                ok = GeneratePreviewV1Fallback();
+                            }
+                        }
+                        catch (EntryPointNotFoundException)
+                        {
+                            _previewV2Available = false;
+                            ok = GeneratePreviewV1Fallback();
+                        }
+                    }
+                    else
+                    {
+                        ok = GeneratePreviewV1Fallback();
+                    }
+                }
+                finally
+                {
+                    if (sampleAnsi != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(sampleAnsi);
+                    }
+
+                    if (fontPathAnsi != IntPtr.Zero)
+                    {
+                        Marshal.FreeHGlobal(fontPathAnsi);
+                    }
+                }
 
                 if (!ok)
                 {
@@ -809,7 +960,7 @@ namespace PuretypeUI
 
             foreach (string key in map.Keys)
             {
-                int dot = key.IndexOf('.');
+                int dot = key.LastIndexOf('.');
                 if (dot > 0)
                 {
                     sections.Add(key[..dot]);
@@ -950,7 +1101,10 @@ namespace PuretypeUI
             }
 
             string deviceName = selected.Tag?.ToString() ?? string.Empty;
-            return $"monitor_{deviceName.Replace("\\", string.Empty).Replace(".", string.Empty).Trim()}".ToLowerInvariant();
+            string normalized = new string(deviceName
+                .Where(c => c != '\\' && c != '.' && !char.IsWhiteSpace(c))
+                .ToArray());
+            return $"monitor_{normalized}".ToLowerInvariant();
         }
 
         private string GetCurrentPanelTag()
@@ -1037,10 +1191,10 @@ namespace PuretypeUI
             if (string.Equals(gammaMode, "standard", StringComparison.OrdinalIgnoreCase)) gammaMode = "srgb";
             SelectComboByTag(ProfGammaModeCombo, gammaMode ?? string.Empty);
 
-            ProfFilterSlider.Value = ParseSectionFloat(map, section, "filterstrength", FilterStrengthSlider.Value, 0.0, 2.0);
-            ProfGammaSlider.Value = ParseSectionFloat(map, section, "gamma", GammaSlider.Value, 0.5, 2.5);
-            ProfStemSlider.Value = ParseSectionFloat(map, section, "stemdarkeningstrength", StemStrengthSlider.Value, 0.0, 1.0);
-            ProfWoledSlider.Value = ParseSectionFloat(map, section, "woledcrosstalkreduction", WoledCrosstalkSlider.Value, 0.0, 0.5);
+            ProfFilterSlider.Value = ParseSectionFloat(map, section, "filterstrength", FilterStrengthSlider.Value, 0.0, 5.0);
+            ProfGammaSlider.Value = ParseSectionFloat(map, section, "gamma", GammaSlider.Value, 0.5, 3.0);
+            ProfStemSlider.Value = ParseSectionFloat(map, section, "stemdarkeningstrength", StemStrengthSlider.Value, 0.0, 2.0);
+            ProfWoledSlider.Value = ParseSectionFloat(map, section, "woledcrosstalkreduction", WoledCrosstalkSlider.Value, 0.0, 1.0);
             ProfStemDarkeningCheck.IsChecked = GetSectionValue(map, section, "stemdarkeningenabled") is { } stemValue
                 ? ParseBoolValue(stemValue, StemDarkeningCheck.IsChecked == true)
                 : StemDarkeningCheck.IsChecked;
@@ -1253,6 +1407,28 @@ namespace PuretypeUI
             UpdateSliderLabels();
             SetQuickPresetSelection(preset);
             UpdatePreview();
+        }
+
+        private void ResetAdvancedDefaults_Click(object sender, RoutedEventArgs e)
+        {
+            if (!IsLoaded)
+            {
+                return;
+            }
+
+            _isUpdatingContext = true;
+            QdSepGen1Slider.Value = -0.44;
+            QdSepGen3Slider.Value = -0.50;
+            QdSepGen4Slider.Value = -0.50;
+            QdVerticalBlendSlider.Value = 0.15;
+            ChromaKeepQdSlider.Value = 1.00;
+            ChromaKeepWoledSlider.Value = 1.00;
+            _isUpdatingContext = false;
+
+            UpdateSliderLabels();
+            SyncQuickPresetSelection();
+            UpdatePreview();
+            StatusConfigText.Text = "Advanced defaults restored";
         }
 
         private void Save_Click(object sender, RoutedEventArgs e)
@@ -1484,6 +1660,171 @@ namespace PuretypeUI
             }
         }
 
+        // ── Update Methods ──────────────────────────────────────────────────────
+
+        private async void CheckForUpdates_Click(object sender, RoutedEventArgs e)
+        {
+            await CheckForUpdatesInternalAsync(silent: false);
+        }
+
+        private async void DownloadUpdate_Click(object sender, RoutedEventArgs e)
+        {
+            if (_latestUpdate is null)
+                return;
+
+            DownloadUpdateBtn.IsEnabled = false;
+            CheckUpdateBtn.IsEnabled = false;
+            UpdateProgressPanel.Visibility = Visibility.Visible;
+            UpdateProgressText.Text = "Downloading...";
+            SetUpdateProgress(0);
+
+            _updateCts?.Cancel();
+            _updateCts = new CancellationTokenSource();
+
+            try
+            {
+                var progress = new Progress<double>(percent =>
+                {
+                    Dispatcher.Invoke(() =>
+                    {
+                        SetUpdateProgress(percent);
+                        UpdateProgressText.Text = $"Downloading... {percent:F0}%";
+                    });
+                });
+
+                _updateStagingDir = await Task.Run(
+                    () => _updateService.DownloadAndExtractAsync(
+                        _latestUpdate.DownloadUrl,
+                        _latestUpdate.ExpectedSha256,
+                        progress,
+                        _updateCts.Token),
+                    _updateCts.Token);
+
+                string verifyNote = _latestUpdate.ExpectedSha256 is not null
+                    ? "Download complete — SHA-256 verified ✓"
+                    : "Download complete.";
+                UpdateProgressText.Text = verifyNote;
+                SetUpdateProgress(100);
+
+                MessageBoxResult result = MessageBox.Show(
+                    this,
+                    $"PureType v{_latestUpdate.Version} is ready to install.\n\n" +
+                    "The application will close and restart automatically.\n" +
+                    "All current settings will be preserved.\n\nProceed?",
+                    "PureType Update",
+                    MessageBoxButton.YesNo,
+                    MessageBoxImage.Question);
+
+                if (result == MessageBoxResult.Yes)
+                {
+                    try
+                    {
+                        SaveSettings();
+                    }
+                    catch
+                    {
+                        // Settings save failure should not block update
+                    }
+
+                    _updateService.InstallUpdate(_updateStagingDir);
+
+                    // Give the PowerShell script a moment to start
+                    await Task.Delay(500);
+                    Application.Current.Shutdown();
+                }
+                else
+                {
+                    UpdateProgressPanel.Visibility = Visibility.Collapsed;
+                    DownloadUpdateBtn.IsEnabled = true;
+                    CheckUpdateBtn.IsEnabled = true;
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                UpdateProgressPanel.Visibility = Visibility.Collapsed;
+                UpdateStatusText.Text = "Download cancelled.";
+                DownloadUpdateBtn.IsEnabled = true;
+                CheckUpdateBtn.IsEnabled = true;
+            }
+            catch (Exception ex)
+            {
+                UpdateProgressPanel.Visibility = Visibility.Collapsed;
+                UpdateStatusText.Text = $"Download failed: {ex.Message}";
+                DownloadUpdateBtn.IsEnabled = true;
+                CheckUpdateBtn.IsEnabled = true;
+            }
+        }
+
+        private void ViewReleasePage_Click(object sender, RoutedEventArgs e)
+        {
+            if (_latestUpdate is not null && !string.IsNullOrEmpty(_latestUpdate.HtmlUrl))
+            {
+                Process.Start(new ProcessStartInfo(_latestUpdate.HtmlUrl) { UseShellExecute = true });
+            }
+        }
+
+        private async Task CheckForUpdatesInternalAsync(bool silent)
+        {
+            if (!silent)
+            {
+                CheckUpdateBtn.IsEnabled = false;
+                UpdateStatusText.Text = "Checking for updates...";
+                UpdateAvailableBanner.Visibility = Visibility.Collapsed;
+                DownloadUpdateBtn.Visibility = Visibility.Collapsed;
+                ViewReleaseBtn.Visibility = Visibility.Collapsed;
+            }
+
+            try
+            {
+                _latestUpdate = await Task.Run(() => _updateService.CheckForUpdateAsync());
+
+                if (_latestUpdate is not null)
+                {
+                    UpdateStatusText.Text = "A new version is available!";
+                    UpdateVersionText.Text = $"PureType v{_latestUpdate.Version} available";
+                    UpdateSizeText.Text = $"Size: {GitHubUpdateService.FormatBytes(_latestUpdate.AssetSize)}";
+
+                    string notes = _latestUpdate.ReleaseNotes;
+                    if (notes.Length > 300)
+                        notes = notes[..300] + "…";
+                    UpdateNotesText.Text = string.IsNullOrWhiteSpace(notes) ? string.Empty : notes;
+
+                    UpdateAvailableBanner.Visibility = Visibility.Visible;
+                    DownloadUpdateBtn.Visibility = Visibility.Visible;
+                    ViewReleaseBtn.Visibility = Visibility.Visible;
+                }
+                else
+                {
+                    if (!silent)
+                    {
+                        UpdateStatusText.Text = $"You're up to date! (v{AppVersion.Current})";
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                if (!silent)
+                {
+                    UpdateStatusText.Text = $"Update check failed: {ex.Message}";
+                }
+            }
+            finally
+            {
+                if (!silent)
+                {
+                    CheckUpdateBtn.IsEnabled = true;
+                }
+            }
+        }
+
+        private void SetUpdateProgress(double percent)
+        {
+            double maxWidth = UpdateProgressPanel.ActualWidth > 0 ? UpdateProgressPanel.ActualWidth : 400;
+            UpdateProgressBar.Width = Math.Max(0, maxWidth * Math.Clamp(percent, 0, 100) / 100.0);
+        }
+
+        // ── Window chrome ────────────────────────────────────────────────────
+
         private void Title_Close(object sender, RoutedEventArgs e) => Close();
         private void Title_Minimize(object sender, RoutedEventArgs e) => WindowState = WindowState.Minimized;
 
@@ -1501,6 +1842,10 @@ namespace PuretypeUI
                 _previewBuffer = IntPtr.Zero;
             }
 
+            _updateCts?.Cancel();
+            _updateCts?.Dispose();
+            _updateService.Dispose();
+
             base.OnClosed(e);
         }
 
@@ -1517,11 +1862,22 @@ namespace PuretypeUI
             "lodThresholdLarge = 22.00\n" +
             "woledCrossTalkReduction = 0.08\n" +
             "lumaContrastStrength = 1.20\n" +
+            "toneParityV2Enabled = true\n" +
+            "dwriteFallbackV2Enabled = true\n" +
+            "contrastSamplingCacheEnabled = true\n" +
+            "colorGlyphBypassEnabled = true\n" +
+            "qdExpectedSepGen1 = -0.44\n" +
+            "qdExpectedSepGen3 = -0.50\n" +
+            "qdExpectedSepGen4 = -0.50\n" +
+            "qdVerticalBlend = 0.15\n" +
+            "chromaKeepScaleQD = 1.00\n" +
+            "chromaKeepScaleWOLED = 1.00\n" +
             "stemDarkeningEnabled = true\n" +
             "stemDarkeningStrength = 0.45\n" +
             "interFontWeight = 400\n" +
             "interOpticalSize = 18\n" +
             "interLetterSpacing = 0.3\n" +
+            "autoCheckUpdates = true\n" +
             "blacklist = vgc.exe, vgtray.exe, easyanticheat.exe, easyanticheat_eos.exe, beservice.exe, bedaisy.exe, gameguard.exe, nprotect.exe, pnkbstra.exe, pnkbstrb.exe, faceit.exe, faceit_ac.exe, csgo.exe, cs2.exe, valorant.exe, valorant-win64-shipping.exe, r5apex.exe, fortniteclient-win64-shipping.exe, eldenring.exe, gta5.exe, rdr2.exe, overwatchlauncher.exe, rainbowsix.exe, destiny2.exe, tarkov.exe\n\n" +
             "[debug]\n" +
             "enabled = false\n" +

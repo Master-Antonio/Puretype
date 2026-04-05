@@ -16,6 +16,8 @@
 #include <sstream>
 #include <algorithm>
 #include <map>
+#include <vector>
+#include <cctype>
 
 #define IDI_PURETYPE_ICON 1
 
@@ -26,6 +28,9 @@ static const UINT WM_TRAYICON = WM_APP + 1;
 // Sent by PuretypeUI after saving the INI — tray reloads the hook immediately.
 // PuretypeUI finds the tray window via FindWindow(kWindowClass, kWindowTitle).
 static const UINT WM_PURETYPE_RELOAD = WM_APP + 2;
+
+// Sent by PuretypeUI when an update is ready to install — tray shuts down gracefully.
+static const UINT WM_PURETYPE_SHUTDOWN = WM_APP + 3;
 
 static const UINT IDM_ENABLE = 1001;
 static const UINT IDM_DISABLE = 1002;
@@ -43,12 +48,18 @@ static HHOOK g_hCBTHook = nullptr;
 static HMODULE g_hDll = nullptr;
 static bool g_hookActive = false;
 static NOTIFYICONDATAW g_nid = {};
+static HANDLE g_hBlacklistMap = nullptr;
+
+static constexpr wchar_t kBlacklistMapName[] = L"Local\\PureTypeBlacklistSnapshot_v1";
+static constexpr DWORD kBlacklistMapBytes = 32 * 1024;
 
 static int g_panelType = 0;
 static bool g_clearTypeWasEnabled = false;
 
 static bool SetClearTypeState(bool enable);
 static bool GetClearTypeState();
+static bool PublishBlacklistSnapshot();
+static void CloseBlacklistSnapshot();
 
 static std::wstring GetDllPath();
 static std::wstring GetIniPath();
@@ -241,6 +252,139 @@ static std::wstring GetIniPath()
     return GetExeDir() + L"puretype.ini";
 }
 
+static std::string TrimAscii(const std::string& s)
+{
+    const auto start = s.find_first_not_of(" \t\r\n");
+    if (start == std::string::npos) return "";
+    const auto end = s.find_last_not_of(" \t\r\n");
+    return s.substr(start, end - start + 1);
+}
+
+static std::string ToLowerAscii(std::string s)
+{
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](const unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return s;
+}
+
+static std::string GetDefaultBlacklistCsv()
+{
+    return
+        "vgc.exe, vgtray.exe, easyanticheat.exe, easyanticheat_eos.exe, "
+        "beservice.exe, bedaisy.exe, gameguard.exe, nprotect.exe, "
+        "pnkbstra.exe, pnkbstrb.exe, faceit.exe, faceit_ac.exe, "
+        "csgo.exe, cs2.exe, valorant.exe, valorant-win64-shipping.exe, "
+        "r5apex.exe, fortniteclient-win64-shipping.exe, eldenring.exe, "
+        "gta5.exe, rdr2.exe, overwatchlauncher.exe, rainbowsix.exe, "
+        "destiny2.exe, tarkov.exe";
+}
+
+static std::vector<std::string> ParseBlacklistCsv(const std::string& csv)
+{
+    std::vector<std::string> entries;
+    std::stringstream ss(csv);
+    std::string item;
+    while (std::getline(ss, item, ','))
+    {
+        if (const auto commentPos = item.find(';'); commentPos != std::string::npos)
+        {
+            item = item.substr(0, commentPos);
+        }
+
+        std::string cleaned = ToLowerAscii(TrimAscii(item));
+        if (!cleaned.empty())
+        {
+            entries.push_back(cleaned);
+        }
+    }
+
+    std::sort(entries.begin(), entries.end());
+    entries.erase(std::unique(entries.begin(), entries.end()), entries.end());
+    return entries;
+}
+
+static std::vector<std::string> LoadEffectiveBlacklistEntries()
+{
+    char iniPathA[MAX_PATH] = {};
+    const std::wstring iniPathW = GetIniPath();
+    WideCharToMultiByte(CP_ACP, 0, iniPathW.c_str(), -1, iniPathA, MAX_PATH, nullptr, nullptr);
+
+    char rawList[32768] = {};
+    GetPrivateProfileStringA(
+        "general",
+        "blacklist",
+        "",
+        rawList,
+        static_cast<DWORD>(sizeof(rawList)),
+        iniPathA);
+
+    std::vector<std::string> entries = ParseBlacklistCsv(rawList);
+    if (entries.empty())
+    {
+        entries = ParseBlacklistCsv(GetDefaultBlacklistCsv());
+    }
+
+    return entries;
+}
+
+static void CloseBlacklistSnapshot()
+{
+    if (g_hBlacklistMap)
+    {
+        CloseHandle(g_hBlacklistMap);
+        g_hBlacklistMap = nullptr;
+    }
+}
+
+static bool PublishBlacklistSnapshot()
+{
+    const auto entries = LoadEffectiveBlacklistEntries();
+
+    std::string payload;
+    for (const auto& entry : entries)
+    {
+        if (payload.size() + entry.size() + 1 >= kBlacklistMapBytes)
+        {
+            return false;
+        }
+
+        payload += entry;
+        payload.push_back('\n');
+    }
+
+    if (payload.empty())
+    {
+        payload = "\n";
+    }
+
+    CloseBlacklistSnapshot();
+
+    g_hBlacklistMap = CreateFileMappingW(
+        INVALID_HANDLE_VALUE,
+        nullptr,
+        PAGE_READWRITE,
+        0,
+        kBlacklistMapBytes,
+        kBlacklistMapName);
+    if (!g_hBlacklistMap)
+    {
+        return false;
+    }
+
+    void* const view = MapViewOfFile(g_hBlacklistMap, FILE_MAP_WRITE, 0, 0, kBlacklistMapBytes);
+    if (!view)
+    {
+        CloseBlacklistSnapshot();
+        return false;
+    }
+
+    ZeroMemory(view, kBlacklistMapBytes);
+    CopyMemory(view, payload.c_str(), payload.size());
+    UnmapViewOfFile(view);
+
+    return true;
+}
+
 static bool EnableHook()
 {
     if (g_hookActive) return true;
@@ -255,6 +399,14 @@ static bool EnableHook()
         return false;
     }
 
+    if (!PublishBlacklistSnapshot())
+    {
+        MessageBoxW(nullptr,
+                    L"Failed to publish blacklist snapshot for strict process gating.",
+                    L"PureType Error", MB_OK | MB_ICONERROR);
+        return false;
+    }
+
     GrantUWPPermissions(dllPath);
 
     g_hDll = LoadLibraryW(dllPath.c_str());
@@ -264,6 +416,7 @@ static bool EnableHook()
                     L"Failed to load PureType.dll.\n"
                     L"Check that all dependencies are present.",
                     L"PureType Error", MB_OK | MB_ICONERROR);
+        CloseBlacklistSnapshot();
         return false;
     }
 
@@ -277,6 +430,7 @@ static bool EnableHook()
                     L"PureType Error", MB_OK | MB_ICONERROR);
         FreeLibrary(g_hDll);
         g_hDll = nullptr;
+        CloseBlacklistSnapshot();
         return false;
     }
 
@@ -292,6 +446,7 @@ static bool EnableHook()
         MessageBoxW(nullptr, msg, L"PureType Error", MB_OK | MB_ICONERROR);
         FreeLibrary(g_hDll);
         g_hDll = nullptr;
+        CloseBlacklistSnapshot();
         return false;
     }
 
@@ -325,6 +480,8 @@ static void DisableHook()
         FreeLibrary(g_hDll);
         g_hDll = nullptr;
     }
+
+    CloseBlacklistSnapshot();
 
     g_hookActive = false;
 
@@ -424,7 +581,8 @@ static void LaunchSettingsUI(HWND hWnd)
     if (hMutex)
     {
         CloseHandle(hMutex);
-        HWND hUI = FindWindowW(nullptr, L"Puretype");
+        HWND hUI = FindWindowW(nullptr, L"PureType - Font Rendering Configuration");
+        if (!hUI) hUI = FindWindowW(nullptr, L"Puretype");
         if (!hUI) hUI = FindWindowW(nullptr, L"Puretype Configuration");
         if (hUI)
         {
@@ -469,6 +627,13 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             EnableHook();
         }
         LoadPanelTypeFromIni();
+        return 0;
+
+    case WM_PURETYPE_SHUTDOWN:
+        // Graceful shutdown requested by PuretypeUI for an update install.
+        DisableHook();
+        RemoveTrayIcon();
+        PostQuitMessage(0);
         return 0;
 
     case WM_TRAYICON:

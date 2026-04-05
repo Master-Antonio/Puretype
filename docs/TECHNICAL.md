@@ -232,15 +232,15 @@ finalB = Y + (finalB − Y) × chromaKeep
 ```
 
 `chromaKeep = 1.0` gives full subpixel colour output. `chromaKeep = 0.0` gives pure
-luma — identical channels, no subpixel benefit. The operating range is 0.70–0.85,
+luma — identical channels, no subpixel benefit. The base operating range is 0.77–0.88,
 depending on font size:
 
 | Size     | QD-OLED | RWBG/RGWB |
 |----------|---------|-----------|
-| ≤ 18 px  | 0.70    | 0.72      |
-| 19–24 px | 0.75    | 0.77      |
-| 25–32 px | 0.80    | 0.82      |
-| > 32 px  | 0.83    | 0.85      |
+| ≤ 18 px  | 0.78    | 0.77      |
+| 19–24 px | 0.82    | 0.80      |
+| 25–32 px | 0.86    | 0.84      |
+| > 32 px  | 0.88    | 0.87      |
 
 Larger text receives more chroma because wider stems span multiple subpixels
 cleanly, making full subpixel colouring perceptually correct rather than distracting.
@@ -287,6 +287,16 @@ compositing formula for emissive displays: OLED pixels emit light linearly, and
 blending must be performed in the linear domain to avoid the systematic darkening
 that occurs when blending in the sRGB gamma-compressed domain.
 
+### Stem darkening transfer
+
+Stem darkening is applied as an exact power transfer on per-channel coverage:
+
+```
+coverage' = 1 - (1 - coverage)^(1 + darkenAmount)
+```
+
+with `coverage` clamped to `[0, 1]` and `darkenAmount >= 0`.
+
 ---
 
 ## FreeType rasterizer (DWrite path)
@@ -320,12 +330,13 @@ centre the rasterization on the triangular subpixel geometry.
 
 **TriangularFilter 2D blending (QD-OLED)**
 
-QD-OLED even and odd rows are offset by ±1.5 subpixels. The filter blends 25% from
-the adjacent row, shifted by the offset:
+QD-OLED even and odd rows are offset by ±1.5 subpixels. The filter blends an adjacent
+row sample shifted by that offset, with blend factor
+`kVertBlend = 0.15 × min(filterStrength, 1.0)`:
 
 ```
-even row: sample = 0.75 × row[y][x] + 0.25 × row[y+1][x + 1.5]
-odd  row: sample = 0.75 × row[y][x] + 0.25 × row[y−1][x − 1.5]
+even row: sample = (1 - kVertBlend) × row[y][x] + kVertBlend × row[y+1][x + 1.5]
+odd  row: sample = (1 - kVertBlend) × row[y][x] + kVertBlend × row[y−1][x − 1.5]
 ```
 
 This approximates the effective coverage a triangular subpixel sees from both the
@@ -339,17 +350,17 @@ All parameters live in `puretype.ini` next to the DLL.
 
 | Key                             | Type   | Range                              | Default      | Description                                    |
 |---------------------------------|--------|------------------------------------|--------------|------------------------------------------------|
-| `panelType`                     | enum   | `rwbg`, `rgwb`, `qd_oled_triangle` | `rwbg`       | Physical subpixel layout of the target display |
+| `panelType`                     | enum   | `rwbg`, `rgwb`, `qd_oled_gen1`, `qd_oled_gen3`, `qd_oled_gen4` (`qd_oled_triangle` alias) | `rwbg`       | Physical subpixel layout of the target display |
 | `filterStrength`                | float  | 0.0 – 5.0                          | 1.0          | Master filter intensity. 0 = passthrough       |
 | `gamma`                         | float  | 0.5 – 3.0                          | 1.0          | Rasterization gamma correction                 |
 | `enableSubpixelHinting`         | bool   | —                                  | true         | FreeType `FT_LOAD_FORCE_AUTOHINT`              |
-| `enableFractionalPositioning`   | bool   | —                                  | true         | Sub-pixel X placement                          |
-| `lodThresholdSmall`             | float  | 6 – 96                             | 10.0         | px below which small-text path activates       |
-| `lodThresholdLarge`             | float  | lodSmall+1 – 160                   | 22.0         | px above which large-text path activates       |
+| `enableFractionalPositioning`   | bool   | —                                  | false        | Sub-pixel X placement                          |
+| `lodThresholdSmall`             | float  | 6 – 96                             | 12.0         | px below which small-text path activates       |
+| `lodThresholdLarge`             | float  | lodSmall+1 – 160                   | 24.0         | px above which large-text path activates       |
 | `woledCrossTalkReduction`       | float  | 0.0 – 1.0                          | 0.08         | W subpixel attenuation factor (WOLED only)     |
-| `lumaContrastStrength`          | float  | 1.0 – 3.0                          | 1.15         | S-curve contrast multiplier                    |
+| `lumaContrastStrength`          | float  | 1.0 – 3.0                          | 1.20         | S-curve contrast multiplier                    |
 | `stemDarkeningEnabled`          | bool   | —                                  | true         | Darken thin vertical stems                     |
-| `stemDarkeningStrength`         | float  | 0.0 – ∞                            | 0.25         | Stem darkening intensity                       |
+| `stemDarkeningStrength`         | float  | 0.0 – 2.0                          | 0.45         | Stem darkening intensity                       |
 | `debug.enabled`                 | bool   | —                                  | false        | Write log file                                 |
 | `debug.logFile`                 | string | —                                  | PURETYPE.log | Log file path (relative to DLL)                |
 | `debug.highlightRenderedGlyphs` | bool   | —                                  | false        | Tint PureType-rendered glyphs cyan             |
@@ -359,8 +370,12 @@ All parameters live in `puretype.ini` next to the DLL.
 ## Injection mechanism
 
 PureType exports a CBT hook procedure (`PureTypeCBTProc`) which Windows uses to
-force the DLL into target processes via `SetWindowsHookEx(WH_CBT, ...)`. The
-hook procedure itself does nothing — its only purpose is to trigger DLL load.
+force the DLL into target processes via `SetWindowsHookEx(WH_CBT, ...)`.
+
+`DllMain(DLL_PROCESS_ATTACH)` now performs only loader-lock-safe setup. Runtime
+initialization (config load, FreeType init, MinHook setup, GDI/DWrite hook
+installation) is triggered once from the first `PureTypeCBTProc` callback,
+outside loader lock.
 
 `DllMain(DLL_PROCESS_ATTACH)` runs the initialisation sequence:
 

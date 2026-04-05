@@ -28,6 +28,22 @@ namespace puretype
         return result;
     }
 
+    std::string Config::NormalizeMonitorName(const std::string& rawMonitorName)
+    {
+        std::string normalized;
+        normalized.reserve(rawMonitorName.size());
+
+        for (const unsigned char c : rawMonitorName)
+        {
+            // Windows monitor names are typically like "\\.\DISPLAY1".
+            // Canonical profile token is sanitized (e.g. display1).
+            if (c == '\\' || c == '.' || std::isspace(c)) continue;
+            normalized.push_back(static_cast<char>(std::tolower(c)));
+        }
+
+        return normalized;
+    }
+
     void Config::ParseLine(const std::string& line, std::string& currentSection)
     {
         std::string trimmed = Trim(line);
@@ -59,6 +75,7 @@ namespace puretype
                                  const std::string& monitorName) const
     {
         const std::string k = ToLower(key);
+        const std::string monitorToken = NormalizeMonitorName(monitorName);
 
         // 1. Try App-specific override
         if (!m_processName.empty())
@@ -68,9 +85,9 @@ namespace puretype
         }
 
         // 2. Try Monitor-specific override
-        if (!monitorName.empty())
+        if (!monitorToken.empty())
         {
-            const std::string monKey = "monitor_" + ToLower(monitorName) + "." + k;
+            const std::string monKey = "monitor_" + monitorToken + "." + k;
             if (const auto it = m_values.find(monKey); it != m_values.end()) return it->second;
         }
 
@@ -103,15 +120,18 @@ namespace puretype
         return true;
     }
 
-    const ConfigData& Config::GetData(const std::string& monitorName)
+    ConfigData Config::GetData(const std::string& monitorName)
     {
         std::lock_guard<std::mutex> lock(m_mutex);
-        auto it = m_monitorDataCache.find(monitorName);
+        const std::string monitorToken = NormalizeMonitorName(monitorName);
+
+        auto it = m_monitorDataCache.find(monitorToken);
         if (it != m_monitorDataCache.end()) return it->second;
 
-        ConfigData d = ParseConfigData(monitorName);
-        m_monitorDataCache[monitorName] = d;
-        return m_monitorDataCache[monitorName];
+        ConfigData d = ParseConfigData(monitorToken);
+        auto [insertedIt, inserted] = m_monitorDataCache.emplace(monitorToken, std::move(d));
+        (void)inserted;
+        return insertedIt->second;
     }
 
     ConfigData Config::ParseConfigData(const std::string& monitorName) const
@@ -182,6 +202,45 @@ namespace puretype
         catch (...) { data.lumaContrastStrength = 1.20f; }
         data.lumaContrastStrength = std::clamp(data.lumaContrastStrength, 1.0f, 3.0f);
 
+        std::string toneParityStr = ToLower(GetValue("toneparityv2enabled", "true", monitorName));
+        data.toneParityV2Enabled = (toneParityStr == "true" || toneParityStr == "1" || toneParityStr == "yes");
+
+        std::string fallbackV2Str = ToLower(GetValue("dwritefallbackv2enabled", "true", monitorName));
+        data.dwriteFallbackV2Enabled =
+            (fallbackV2Str == "true" || fallbackV2Str == "1" || fallbackV2Str == "yes");
+
+        std::string samplingCacheStr = ToLower(GetValue("contrastsamplingcacheenabled", "true", monitorName));
+        data.contrastSamplingCacheEnabled =
+            (samplingCacheStr == "true" || samplingCacheStr == "1" || samplingCacheStr == "yes");
+
+        std::string colorBypassStr = ToLower(GetValue("colorglyphbypassenabled", "true", monitorName));
+        data.colorGlyphBypassEnabled =
+            (colorBypassStr == "true" || colorBypassStr == "1" || colorBypassStr == "yes");
+
+        try { data.qdExpectedSepGen1 = std::stof(GetValue("qdexpectedsepgen1", "-0.44", monitorName)); }
+        catch (...) { data.qdExpectedSepGen1 = -0.44f; }
+        data.qdExpectedSepGen1 = std::clamp(data.qdExpectedSepGen1, -1.00f, -0.10f);
+
+        try { data.qdExpectedSepGen3 = std::stof(GetValue("qdexpectedsepgen3", "-0.50", monitorName)); }
+        catch (...) { data.qdExpectedSepGen3 = -0.50f; }
+        data.qdExpectedSepGen3 = std::clamp(data.qdExpectedSepGen3, -1.00f, -0.10f);
+
+        try { data.qdExpectedSepGen4 = std::stof(GetValue("qdexpectedsepgen4", "-0.50", monitorName)); }
+        catch (...) { data.qdExpectedSepGen4 = -0.50f; }
+        data.qdExpectedSepGen4 = std::clamp(data.qdExpectedSepGen4, -1.00f, -0.10f);
+
+        try { data.qdVerticalBlend = std::stof(GetValue("qdverticalblend", "0.15", monitorName)); }
+        catch (...) { data.qdVerticalBlend = 0.15f; }
+        data.qdVerticalBlend = std::clamp(data.qdVerticalBlend, 0.0f, 0.30f);
+
+        try { data.chromaKeepScaleQD = std::stof(GetValue("chromakeepscaleqd", "1.0", monitorName)); }
+        catch (...) { data.chromaKeepScaleQD = 1.0f; }
+        data.chromaKeepScaleQD = std::clamp(data.chromaKeepScaleQD, 0.60f, 1.30f);
+
+        try { data.chromaKeepScaleWOLED = std::stof(GetValue("chromakeepscalewoled", "1.0", monitorName)); }
+        catch (...) { data.chromaKeepScaleWOLED = 1.0f; }
+        data.chromaKeepScaleWOLED = std::clamp(data.chromaKeepScaleWOLED, 0.60f, 1.30f);
+
         std::string stemStr = ToLower(GetValue("stemdarkeningenabled", "true", monitorName));
         data.stemDarkeningEnabled = (stemStr == "true" || stemStr == "1" || stemStr == "yes");
 
@@ -213,13 +272,19 @@ namespace puretype
         catch (...) { data.interLetterSpacing = 0.3f; }
         data.interLetterSpacing = std::clamp(data.interLetterSpacing, -2.0f, 4.0f);
 
-        std::string debugStr = ToLower(GetValue("enabled", "false", monitorName));
+        auto getDebugValue = [this](const std::string& key, const std::string& defaultValue) -> std::string
+        {
+            const std::string fullKey = "debug." + ToLower(key);
+            if (const auto it = m_values.find(fullKey); it != m_values.end()) return it->second;
+            return defaultValue;
+        };
+
+        std::string debugStr = ToLower(getDebugValue("enabled", "false"));
         data.debugEnabled = (debugStr == "true" || debugStr == "1" || debugStr == "yes");
 
-        data.logFile = GetValue("logfile", "PURETYPE.log", monitorName);
-        // debug usually doesn't have app/monitor overrides but okay
+        data.logFile = getDebugValue("logfile", "PURETYPE.log");
 
-        std::string highlightStr = ToLower(GetValue("highlightrenderedglyphs", "false", monitorName));
+        std::string highlightStr = ToLower(getDebugValue("highlightrenderedglyphs", "false"));
         data.highlightRenderedGlyphs = (highlightStr == "true" || highlightStr == "1" || highlightStr == "yes");
 
         std::string blacklistStr = ToLower(GetValue("blacklist", "", monitorName));

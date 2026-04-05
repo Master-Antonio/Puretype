@@ -7,7 +7,7 @@ namespace puretype
 {
     namespace hooks
     {
-        bool InstallDWriteHooks();
+        bool InstallDWriteHooks(bool primeExistingObjects = true);
 
         void RemoveDWriteHooks();
     }

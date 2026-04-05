@@ -244,7 +244,7 @@ Any key you **don't** specify in a profile section inherits from `[general]` aut
 #### Monitor profiles
 
 The section name uses the format `[monitor_<devicename>]` where `<devicename>` is the Windows display device path with
-backslashes and dots removed, all lowercase.
+backslashes, dots, and whitespace removed, all lowercase.
 
 To find your device name, run in PowerShell:
 
@@ -358,9 +358,11 @@ font/                     Bundled Inter variable font files
 
 1. `puretype.exe` installs a desktop-wide `WH_CBT` hook referencing `PureType.dll`.
 2. Windows loads `PureType.dll` into every new GUI process.
-3. `DllMain(DLL_PROCESS_ATTACH)` → loads config → initializes FreeType → installs GDI + DWrite hooks via MinHook.
-4. Hooks intercept text rendering calls → subpixel filter pipeline runs.
-5. `DLL_PROCESS_DETACH` → hooks disabled → spin-wait on ref-counted in-flight calls → resources destroyed.
+3. `DllMain(DLL_PROCESS_ATTACH)` performs only minimal setup plus an early strict blacklist gate (from injector snapshot).
+  If that snapshot is missing or invalid, attach fails closed (`return FALSE`) so the DLL is not injected.
+4. First `PureTypeCBTProc` callback performs runtime init outside loader lock: config load, FreeType init, GDI + DWrite hook install via MinHook.
+5. Hooks intercept text rendering calls → subpixel filter pipeline runs.
+6. `DLL_PROCESS_DETACH` → hooks disabled → spin-wait on ref-counted in-flight calls → resources destroyed.
 
 ---
 
@@ -398,7 +400,7 @@ On puretype you can create your blacklist, customize it from **Settings → Proc
 Downloaded automatically via CMake FetchContent:
 
 - [FreeType 2](https://freetype.org/) — VER-2-14-3
-- [MinHook](https://github.com/TsudaKageyu/minhook) — latest
+- [MinHook](https://github.com/TsudaKageyu/minhook) — v1.3.4
 
 ### Build commands
 
