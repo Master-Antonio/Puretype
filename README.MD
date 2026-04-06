@@ -17,7 +17,7 @@
 
 ## Why PureType?
 
-ClearType was designed in 2000 for RGB-stripe LCD panels. Modern OLED displays — LG WOLED, Samsung QD-OLED — have
+ClearType was designed in 2000 for RGB-stripe LCD panels. Modern OLED displays, LG WOLED and Samsung QD-OLED, have
 completely different subpixel layouts:
 
 - **WOLED** panels add a fourth **white** subpixel that ClearType does not model.
@@ -30,6 +30,7 @@ your panel.
 Subpixel center positions are derived from **panel microscopy** — macro photographs with individual subpixels lit
 individually — rather than geometric assumptions.
 
+Discord: https://discord.gg/c2U8QbHzv9
 ---
 
 ## Supported panels
@@ -451,4 +452,6 @@ GPL-3.0 — see [LICENSE](LICENSE)
   <strong>Support the project:</strong> <a href="https://paypal.me/masterantonio">paypal.me/masterantonio</a><br/>
   <strong>Author:</strong> <a href="https://github.com/Master-Antonio">Toriga</a>
 </p>
+
+
 
