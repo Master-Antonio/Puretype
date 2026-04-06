@@ -39,13 +39,19 @@ public sealed class GitHubUpdateService : IDisposable
 {
     private const string GitHubOwner = "Master-Antonio";
     private const string GitHubRepo = "PureType";
-    private const string ApiUrl = $"https://api.github.com/repos/{GitHubOwner}/{GitHubRepo}/releases/latest";
+    private const string ApiUrl = $"https://api.github.com/repos/{GitHubOwner}/{GitHubRepo}/releases?per_page=15";
     private const string UserAgent = $"{GitHubRepo}-Updater";
 
     // Regex to extract SHA-256 hash from the release body.
     // Expected format in the release notes:  SHA256: <64-char hex>
     private static readonly Regex Sha256Regex = new(
         @"SHA256:\s*([0-9a-fA-F]{64})",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    // Regex to strip pre-release suffixes (e.g. "-alpha", "-beta.2", "-rc1")
+    // so that System.Version.TryParse can handle the numeric portion.
+    private static readonly Regex PreReleaseSuffixRegex = new(
+        @"-[a-zA-Z].*$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     // Tray window constants matching injector.cpp
@@ -360,71 +366,99 @@ public sealed class GitHubUpdateService : IDisposable
         catch { /* best effort */ }
     }
 
+    /// <summary>
+    /// Strips pre-release suffixes ("-alpha", "-beta.2", "-rc1") so that
+    /// System.Version.TryParse can handle the numeric portion.
+    /// </summary>
+    private static string StripPreReleaseSuffix(string version)
+        => PreReleaseSuffixRegex.Replace(version, string.Empty);
+
+    /// <summary>
+    /// Parses the JSON response from /releases (an array of release objects).
+    /// Iterates all releases (including pre-releases) and returns the newest
+    /// one that is newer than the current local version and has a ZIP asset.
+    /// </summary>
     private static UpdateInfo? ParseReleaseJson(string json)
     {
         using JsonDocument doc = JsonDocument.Parse(json);
         JsonElement root = doc.RootElement;
 
-        string tagName = root.GetProperty("tag_name").GetString() ?? string.Empty;
-        string versionString = tagName.TrimStart('v', 'V');
+        // The /releases endpoint returns an array; /releases/latest returns an object.
+        // Support both for backward compatibility with cached responses.
+        IEnumerable<JsonElement> releases = root.ValueKind == JsonValueKind.Array
+            ? root.EnumerateArray()
+            : new[] { root };
 
-        if (!Version.TryParse(versionString, out Version? remoteVersion))
+        string localVersionStr = StripPreReleaseSuffix(AppVersion.Current);
+        if (!Version.TryParse(localVersionStr, out Version? localVersion))
             return null;
 
-        if (!Version.TryParse(AppVersion.Current, out Version? localVersion))
-            return null;
-
-        if (remoteVersion <= localVersion)
-            return null;
-
-        // Find the best ZIP asset
-        string downloadUrl = string.Empty;
-        long assetSize = 0;
-
-        if (root.TryGetProperty("assets", out JsonElement assets))
+        foreach (JsonElement release in releases)
         {
-            foreach (JsonElement asset in assets.EnumerateArray())
+            // Skip drafts
+            if (release.TryGetProperty("draft", out JsonElement draftEl) && draftEl.GetBoolean())
+                continue;
+
+            string tagName = release.GetProperty("tag_name").GetString() ?? string.Empty;
+            string versionString = StripPreReleaseSuffix(tagName.TrimStart('v', 'V'));
+
+            if (!Version.TryParse(versionString, out Version? remoteVersion))
+                continue;
+
+            if (remoteVersion <= localVersion)
+                continue;
+
+            // Find the best ZIP asset
+            string downloadUrl = string.Empty;
+            long assetSize = 0;
+
+            if (release.TryGetProperty("assets", out JsonElement assets))
             {
-                string name = asset.GetProperty("name").GetString() ?? string.Empty;
-                if (name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                foreach (JsonElement asset in assets.EnumerateArray())
                 {
-                    downloadUrl = asset.GetProperty("browser_download_url").GetString() ?? string.Empty;
-                    assetSize = asset.GetProperty("size").GetInt64();
-                    break;
+                    string name = asset.GetProperty("name").GetString() ?? string.Empty;
+                    if (name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+                    {
+                        downloadUrl = asset.GetProperty("browser_download_url").GetString() ?? string.Empty;
+                        assetSize = asset.GetProperty("size").GetInt64();
+                        break;
+                    }
                 }
             }
+
+            if (string.IsNullOrEmpty(downloadUrl))
+                continue;
+
+            string releaseNotes = release.TryGetProperty("body", out JsonElement bodyEl)
+                ? bodyEl.GetString() ?? string.Empty
+                : string.Empty;
+
+            string htmlUrl = release.TryGetProperty("html_url", out JsonElement urlEl)
+                ? urlEl.GetString() ?? string.Empty
+                : string.Empty;
+
+            string? expectedSha256 = null;
+
+            // Parse SHA-256 hash from release notes
+            Match sha256Match = Sha256Regex.Match(releaseNotes);
+            if (sha256Match.Success)
+            {
+                expectedSha256 = sha256Match.Groups[1].Value;
+            }
+
+            return new UpdateInfo
+            {
+                TagName = tagName,
+                Version = remoteVersion,
+                DownloadUrl = downloadUrl,
+                AssetSize = assetSize,
+                ReleaseNotes = releaseNotes,
+                HtmlUrl = htmlUrl,
+                ExpectedSha256 = expectedSha256
+            };
         }
 
-        if (string.IsNullOrEmpty(downloadUrl))
-            return null;
-
-        string releaseNotes = root.TryGetProperty("body", out JsonElement bodyEl)
-            ? bodyEl.GetString() ?? string.Empty
-            : string.Empty;
-
-        string htmlUrl = root.TryGetProperty("html_url", out JsonElement urlEl)
-            ? urlEl.GetString() ?? string.Empty
-            : string.Empty;
-
-        string? expectedSha256 = null;
-
-        // Parse SHA-256 hash from release notes
-        Match sha256Match = Sha256Regex.Match(releaseNotes);
-        if (sha256Match.Success)
-        {
-            expectedSha256 = sha256Match.Groups[1].Value;
-        }
-
-        return new UpdateInfo
-        {
-            TagName = tagName,
-            Version = remoteVersion,
-            DownloadUrl = downloadUrl,
-            AssetSize = assetSize,
-            ReleaseNotes = releaseNotes,
-            HtmlUrl = htmlUrl,
-            ExpectedSha256 = expectedSha256
-        };
+        return null;
     }
 
     private static async Task<string> ComputeSha256Async(string filePath, CancellationToken ct)

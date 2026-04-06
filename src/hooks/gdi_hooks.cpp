@@ -329,7 +329,8 @@ namespace puretype::hooks
                             bool isComposited, // DC belongs to a composited/layered window
                             float dpiScale = 1.0f, // 1.0 = full effect, 0.0 = skip (DPI fade)
                             uint16_t fontWeight = 400, // LOGFONT::lfWeight
-                            float emSizePx = 0.0f) // font metric size hint (pixels)
+                            float emSizePx = 0.0f, // font metric size hint (pixels)
+                            COLORREF bkColor = CLR_INVALID) // explicit BkColor for ETO_OPAQUE
     {
         (void)isComposited;
 
@@ -478,6 +479,18 @@ namespace puretype::hooks
             return std::clamp((ct - bg) / d, 0.0f, 1.0f);
         };
 
+        // When ETO_OPAQUE is set, GDI fills the rect with BkColor as part of
+        // the same ExtTextOutW call — between our before and after captures.
+        // Use the known BkColor instead of before-capture pixels for accurate
+        // mask extraction and blend background.
+        const bool useExplicitBg = opaqueBackground && bkColor != CLR_INVALID;
+        const float explBgR_s = useExplicitBg ? static_cast<float>(GetRValue(bkColor)) : 0.0f;
+        const float explBgG_s = useExplicitBg ? static_cast<float>(GetGValue(bkColor)) : 0.0f;
+        const float explBgB_s = useExplicitBg ? static_cast<float>(GetBValue(bkColor)) : 0.0f;
+        const float explBgR_lin = useExplicitBg ? sRGBToLinear(GetRValue(bkColor)) : 0.0f;
+        const float explBgG_lin = useExplicitBg ? sRGBToLinear(GetGValue(bkColor)) : 0.0f;
+        const float explBgB_lin = useExplicitBg ? sRGBToLinear(GetBValue(bkColor)) : 0.0f;
+
         for (int row = 0; row < h; ++row)
         {
             const uint8_t* bRow = before.data.data() + row * before.pitch;
@@ -503,14 +516,25 @@ namespace puretype::hooks
                 }
 
                 // Linearise background for the final blend (Pass 3).
-                rowBgB[col] = sRGBToLinear(bp[0]);
-                rowBgG[col] = sRGBToLinear(bp[1]);
-                rowBgR[col] = sRGBToLinear(bp[2]);
+                // When ETO_OPAQUE, use the known BkColor (the actual background
+                // GDI composited text onto) instead of before-capture pixels.
+                if (useExplicitBg)
+                {
+                    rowBgR[col] = explBgR_lin;
+                    rowBgG[col] = explBgG_lin;
+                    rowBgB[col] = explBgB_lin;
+                }
+                else
+                {
+                    rowBgB[col] = sRGBToLinear(bp[0]);
+                    rowBgG[col] = sRGBToLinear(bp[1]);
+                    rowBgR[col] = sRGBToLinear(bp[2]);
+                }
 
                 // Extract per-channel subpixel coverage masks in sRGB space.
-                const float bgB_s = static_cast<float>(bp[0]);
-                const float bgG_s = static_cast<float>(bp[1]);
-                const float bgR_s = static_cast<float>(bp[2]);
+                const float bgB_s = useExplicitBg ? explBgB_s : static_cast<float>(bp[0]);
+                const float bgG_s = useExplicitBg ? explBgG_s : static_cast<float>(bp[1]);
+                const float bgR_s = useExplicitBg ? explBgR_s : static_cast<float>(bp[2]);
                 const float ctB_s = static_cast<float>(ap[0]);
                 const float ctG_s = static_cast<float>(ap[1]);
                 const float ctR_s = static_cast<float>(ap[2]);
@@ -528,10 +552,11 @@ namespace puretype::hooks
                     continue;
                 }
 
-                if (opaqueBackground)
+                if (opaqueBackground && !useExplicitBg)
                 {
                     // Opaque draws can include large uniform fills in the same call.
                     // Only treat edge-like pixels as text; keep flat fill areas untouched.
+                    // (Skipped when useExplicitBg: correct bg makes fill pixels mask=0 naturally.)
                     int edgeScore = 0;
                     if (col > 0)
                     {
@@ -1185,8 +1210,13 @@ namespace puretype::hooks
                     }
                 }
 
+                // When ETO_OPAQUE, read the DC's BkColor so RemapToOLED can
+                // use it as the correct background for mask extraction.
+                const COLORREF bkColor = opaqueBackground ? GetBkColor(hdc) : CLR_INVALID;
+
                 RemapToOLED(hdc, before, after, textColor, cfg,
-                            opaqueBackground, isComposited, dpiScale, fontWeight, emSizePx);
+                            opaqueBackground, isComposited, dpiScale, fontWeight, emSizePx,
+                            bkColor);
             }
 
             g_insideHook = false;
