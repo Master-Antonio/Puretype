@@ -42,6 +42,7 @@
 >
 > **Notice on Legacy Code:** Previous open-source versions of this project were released under the **GNU General Public License v3.0 (GPLv3)**. Anyone using, modifying, or distributing that legacy codebase is legally required to adhere strictly to the GPLv3 terms. This includes the mandatory requirement that any derivative works or modified versions based on that code must also be made completely open-source under the GPLv3 license and clearly state the original authorship.
 
+Check here for the results https://www.patreon.com/Puretype/posts/puretype-in-real-167650239
 ---
 
 ## At a Glance
